@@ -15,14 +15,14 @@
 cd ~ || exit 1
 
 # Navigate to the project directory
-cd /home/debian/projects || {
+cd /opt/ollama-gui || {
     echo "Error: Project directory not found."
     exit 1
 }
 
 # Activate the Python virtual environment
-if [ -f "my-ollama-env/bin/activate" ]; then
-    source my-ollama-env/bin/activate
+if [ -f "ollama-env/bin/activate" ]; then
+    source ollama-env/bin/activate
 else
     echo "Error: Virtual environment not found."
     exit 1
