@@ -10,6 +10,20 @@
 # 4. Runs the Ollama-GUI environment setup script
 # ------------------------------------------------------------
 
+
+# First of all start DataBase
+echo "🐘 Checking PostgreSQL status..."
+
+if /usr/lib/postgresql/17/bin/pg_isready &> /dev/null; then
+    echo "✅ PostgreSQL is already running."
+else
+    echo "🚀 PostgreSQL is down. Starting now..."
+
+    /usr/lib/postgresql/17/bin/pg_ctl -D /home/debian/projects/postgres/data -l /home/debian/projects/logfile start
+    
+    sleep 3
+fi
+
 # Navigate to the Ollama-GUI directory
 cd /opt/ollama-gui || {
     echo "Error: Ollama-GUI directory not found."
