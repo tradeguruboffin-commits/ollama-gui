@@ -100,12 +100,13 @@ class PostgresDB:
                 FROM crews
                 ORDER BY is_default DESC, name ASC
             """)
-            return cur.fetchall()
+            return [dict(row) for row in cur.fetchall()]  # RealDictRow -> dict
 
     def get_crew(self, crew_id):
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM crews WHERE id = %s", (crew_id,))
-            return cur.fetchone()
+            row = cur.fetchone()
+            return dict(row) if row else None
 
     def update_crew(self, crew_id, name, config):
         config_json = json.dumps(config)
@@ -113,6 +114,12 @@ class PostgresDB:
             cur.execute("""
                 UPDATE crews SET name = %s, config = %s WHERE id = %s
             """, (name, config_json, crew_id))
+
+    def update_crew_name(self, crew_id, new_name):  # ← এটা ঠিক জায়গায় যোগ করা হয়েছে
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                UPDATE crews SET name = %s WHERE id = %s
+            """, (new_name, crew_id))
 
     def delete_crew(self, crew_id):
         with self.conn.cursor() as cur:
@@ -130,12 +137,12 @@ class PostgresDB:
             if row:
                 try:
                     return json.loads(row[0])
-                except:
-                    pass
+                except json.JSONDecodeError:
+                    return []
         # Fallback to legacy settings table
         return self.get_default_crew()
 
-    # ==================== REST OF YOUR ORIGINAL FUNCTIONS ====================
+    # ==================== CONVERSATION FUNCTIONS ====================
 
     def create_conversation(self, title=None, model=None, folder=None):
         title = (title or "New Chat").strip()
@@ -159,12 +166,13 @@ class PostgresDB:
                 params.append(folder)
             query += " ORDER BY pinned DESC, created_at DESC"
             cur.execute(query, params)
-            return cur.fetchall()
+            return [dict(row) for row in cur.fetchall()]
 
     def get_conversation(self, conversation_id):
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,))
-            return cur.fetchone()
+            row = cur.fetchone()
+            return dict(row) if row else None
 
     def rename_conversation(self, conversation_id, new_title):
         with self.conn.cursor() as cur:
@@ -192,10 +200,13 @@ class PostgresDB:
                 SELECT id, role, content, created_at
                 FROM messages WHERE conversation_id = %s ORDER BY id ASC
             """, (conversation_id,))
-            return cur.fetchall()
+            return [dict(row) for row in cur.fetchall()]
 
     def export_conversation(self, conversation_id):
-        return {"conversation": self.get_conversation(conversation_id), "messages": self.get_messages(conversation_id)}
+        return {
+            "conversation": self.get_conversation(conversation_id),
+            "messages": self.get_messages(conversation_id)
+        }
 
     def close(self):
         if self.conn:
@@ -206,5 +217,5 @@ if __name__ == "__main__":
     db = PostgresDB()
     print("✅ Database ready!")
     print("Crews:", len(db.list_crews()))
-    print("Default crew agents:", len(db.get_default_crew_config()))
+    print("Default crew agents:", len(db.get_default_crew_config() or []))
     db.close()

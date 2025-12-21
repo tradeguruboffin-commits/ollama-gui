@@ -192,6 +192,7 @@ class OllamaGUI(QMainWindow):
         self.advanced_mode = False
         self.current_crew_id = None
         self.current_crew_config = self.db.get_default_crew_config() or []
+        self.current_crew_name = None  # নতুন: বর্তমান crew-এর নাম ট্র্যাক করা
         self.models = []
         self.last_user_prompt = ""
 
@@ -199,6 +200,7 @@ class OllamaGUI(QMainWindow):
         self.load_models()
         self.refresh_conversations()
         self.refresh_crews_list()
+        self.update_current_crew_button()  # প্রথমে বাটন আপডেট
 
     def init_ui(self):
         central = QWidget()
@@ -221,6 +223,11 @@ class OllamaGUI(QMainWindow):
         left.addWidget(self.conv_list)
 
         left.addWidget(QLabel("<b>⚙️ Crews</b>"))
+
+        self.new_crew_btn = QPushButton("➕ Add New Crew")
+        self.new_crew_btn.clicked.connect(self.create_new_crew)
+        left.addWidget(self.new_crew_btn)
+
         self.crew_list = QListWidget()
         self.crew_list.itemClicked.connect(self.select_crew_from_list)
         self.crew_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -318,6 +325,15 @@ class OllamaGUI(QMainWindow):
             self.stop_reload_btn.setStyleSheet("QPushButton { background-color: #393; color: white; }")
         self.stop_reload_btn.setEnabled(is_running or bool(self.last_user_prompt))
 
+    # ================= CURRENT CREW BUTTON UPDATE =================
+    def update_current_crew_button(self):
+        if self.current_crew_config and self.current_crew_name:
+            self.current_crew_btn.setText(f"📋 {self.current_crew_name} ({len(self.current_crew_config)} agents)")
+            self.current_crew_btn.setStyleSheet("QPushButton { background-color: #2d8; color: white; font-weight: bold; }")
+        else:
+            self.current_crew_btn.setText("📋 No Crew Selected")
+            self.current_crew_btn.setStyleSheet("")
+
     # ================= CREW METHODS =================
     def refresh_crews_list(self):
         self.crew_list.clear()
@@ -328,43 +344,60 @@ class OllamaGUI(QMainWindow):
             item.setData(Qt.UserRole, crew['id'])
             self.crew_list.addItem(item)
 
-        if self.current_crew_config:
-            default_crew = next((c for c in crews if c['is_default']), None)
-            name = default_crew['name'] if default_crew else "Custom Crew"
-            self.current_crew_btn.setText(f"📋 {name} ({len(self.current_crew_config)} agents)")
-            self.current_crew_btn.setStyleSheet("QPushButton { background-color: #2d8; color: white; font-weight: bold; }")
-        else:
-            self.current_crew_btn.setText("📋 No Crew Selected")
-            self.current_crew_btn.setStyleSheet("")
+        # শুধু লিস্ট রিফ্রেশ, বাটন আলাদা ফাংশনে আপডেট করব
+        self.update_current_crew_button()
 
     def select_crew_from_list(self, item):
         crew_id = item.data(Qt.UserRole)
         crew = self.db.get_crew(crew_id)
         self.current_crew_config = json.loads(crew['config'])
         self.current_crew_id = crew_id
-        self.refresh_crews_list()
+        self.current_crew_name = crew['name']  # গুরুত্বপূর্ণ
+        self.update_current_crew_button()
         self.chat.append(f"\n✅ Switched to crew: <b>{crew['name']}</b> ({len(self.current_crew_config)} agents)\n")
 
     def show_crew_menu(self, pos):
         item = self.crew_list.itemAt(pos)
-        if not item: return
-        crew_id = item.data(Qt.UserRole)
         menu = QMenu()
-        menu.addAction("✨ Set as Default").triggered.connect(lambda: self.set_default_crew(crew_id))
-        menu.addAction("✏ Edit").triggered.connect(lambda: self.edit_crew(crew_id))
-        menu.addAction("🗑 Delete").triggered.connect(lambda: self.delete_crew(crew_id))
-        menu.addSeparator()
-        menu.addAction("➕ Create New Crew").triggered.connect(self.create_new_crew)
-        menu.exec_(self.crew_list.mapToGlobal(pos))
+
+        if item:
+            crew_id = item.data(Qt.UserRole)
+            crew = self.db.get_crew(crew_id)
+
+            menu.addAction("⭐ Set as Default").triggered.connect(lambda: self.set_default_crew(crew_id))
+            rename_act = menu.addAction("✏ Rename")
+            menu.addAction("✏ Edit").triggered.connect(lambda: self.edit_crew(crew_id))
+            menu.addAction("🗑 Delete").triggered.connect(lambda: self.delete_crew(crew_id))
+            menu.addSeparator()
+
+            action = menu.exec_(self.crew_list.mapToGlobal(pos))
+
+            if action == rename_act:
+                new_name, ok = QInputDialog.getText(self, "Rename Crew", "New crew name:", text=crew['name'])
+                if ok and new_name.strip() and new_name.strip() != crew['name']:
+                    self.db.update_crew_name(crew_id, new_name.strip())
+                    self.refresh_crews_list()
+                    if crew_id == self.current_crew_id:
+                        self.current_crew_name = new_name.strip()
+                        self.update_current_crew_button()
+                    self.chat.append(f"\n✅ Crew renamed to: <b>{new_name.strip()}</b>\n")
+        else:
+            menu.addAction("➕ Create New Crew").triggered.connect(self.create_new_crew)
+            menu.exec_(self.crew_list.mapToGlobal(pos))
 
     def create_new_crew(self):
         dialog = CrewConfigDialog(self.models, parent=self)
         if dialog.exec_() == QDialog.Accepted:
             name, config = dialog.get_crew_data()
             if name and config:
-                self.db.create_crew(name, config)
+                new_id = self.db.create_crew(name, config)
                 self.refresh_crews_list()
-                self.chat.append(f"\n✅ Created new crew: <b>{name}</b>\n")
+                # অটো সিলেক্ট করব নতুন crew
+                self.current_crew_id = new_id
+                self.current_crew_name = name
+                self.current_crew_config = config
+                self.update_current_crew_button()
+                self.chat.append(f"\n✅ Created & switched to new crew: <b>{name}</b>\n")
 
     def edit_crew(self, crew_id):
         crew = self.db.get_crew(crew_id)
@@ -376,6 +409,8 @@ class OllamaGUI(QMainWindow):
                 self.db.update_crew(crew_id, name, new_config)
                 if crew_id == self.current_crew_id:
                     self.current_crew_config = new_config
+                    self.current_crew_name = name
+                    self.update_current_crew_button()
                 self.refresh_crews_list()
                 self.chat.append(f"\n✅ Updated crew: <b>{name}</b>\n")
 
@@ -387,13 +422,17 @@ class OllamaGUI(QMainWindow):
             if crew_id == self.current_crew_id:
                 self.current_crew_config = []
                 self.current_crew_id = None
+                self.current_crew_name = None
+                self.update_current_crew_button()
             self.refresh_crews_list()
 
     def set_default_crew(self, crew_id):
         self.db.set_default_crew(crew_id)
-        self.current_crew_id = crew_id
         crew = self.db.get_crew(crew_id)
+        self.current_crew_id = crew_id
         self.current_crew_config = json.loads(crew['config'])
+        self.current_crew_name = crew['name']
+        self.update_current_crew_button()
         self.refresh_crews_list()
         self.chat.append(f"\n⭐ Set <b>{crew['name']}</b> as default crew!\n")
 
@@ -401,9 +440,8 @@ class OllamaGUI(QMainWindow):
         if not self.current_crew_config:
             self.create_new_crew()
         else:
-            default_crew = next((c for c in self.db.list_crews() if c['is_default']), None)
-            if default_crew:
-                self.edit_crew(default_crew['id'])
+            if self.current_crew_id:
+                self.edit_crew(self.current_crew_id)
 
     # ================= CHAT & GENERATION =================
     def toggle_advanced_mode(self):
@@ -519,7 +557,6 @@ class OllamaGUI(QMainWindow):
         for m in messages:
             who = "🧑 YOU" if m["role"] == "user" else "🤖 BOFFIN"
             self.chat.append(f"{who}:\n{m['content']}\n")
-        # Update last prompt
         if messages and messages[-1]["role"] == "user":
             self.last_user_prompt = messages[-1]["content"]
         self.update_stop_reload_button(is_running=False)
