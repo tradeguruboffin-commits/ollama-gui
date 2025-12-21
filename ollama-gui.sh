@@ -39,7 +39,7 @@ if ping -c 1 google.com &> /dev/null; then
     # Example:
     #   git stash push -m "Pre-update stash"
 
-    git pull
+#    git pull
 
     # If stashing was used, it can be restored with:
     #   git stash pop
