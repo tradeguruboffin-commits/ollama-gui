@@ -28,7 +28,8 @@ class DirectOllamaThread(QThread):
         self.running = True
         self.last_response = ""
 
-    def stop(self): self.running = False
+    def stop(self):
+        self.running = False
 
     def run(self):
         try:
@@ -44,10 +45,11 @@ class DirectOllamaThread(QThread):
             with requests.post(url, json=payload, stream=True, timeout=300) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
-                    if not self.running: break
+                    if not self.running:
+                        break
                     if line:
                         data = json.loads(line.decode())
-                        if data.get("message", {}).get("content"):
+                        if "message" in data and "content" in data["message"]:
                             token = data["message"]["content"]
                             response += token
                             self.token.emit(token)
@@ -71,7 +73,8 @@ class CustomCrewThread(QThread):
         self.history_messages = history_messages
         self.running = True
 
-    def stop(self): self.running = False
+    def stop(self):
+        self.running = False
 
     def run(self):
         try:
@@ -81,16 +84,34 @@ class CustomCrewThread(QThread):
             previous = f"{context}\nUSER: {self.user_prompt}"
 
             for i, agent in enumerate(self.crew_config, 1):
-                if not self.running: break
-                role, model = agent['role'], agent['model']
-                self.token.emit(f"\n[👤 {i}. {role} ({model}) Working...]\n")
+                if not self.running:
+                    break
+
+                role = agent['role']
+                model = agent['model']
+                system_prompt = agent.get('system_prompt', '').strip()
                 input_prompt = agent['input_prompt'].format(previous=previous)
-                thread = DirectOllamaThread(model, [{"role": "user", "content": input_prompt}])
-                thread.token.connect(self.token)
-                thread.start()
-                thread.wait()
-                if not self.running: break
-                out = thread.last_response.strip()
+
+                self.token.emit(f"\n[👤 {i}. {role} ({model}) Working...]\n")
+
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": input_prompt})
+
+                agent_thread = DirectOllamaThread(model, messages)
+                agent_thread.token.connect(self.token)
+                agent_thread.error.connect(self.error)
+
+                agent_thread.start()
+                agent_thread.wait()  # পরবর্তী এজেন্টের জন্য output দরকার → অপেক্ষা করতেই হবে
+
+                if not self.running:
+                    break
+
+                out = agent_thread.last_response.strip()
+                if not out:
+                    out = "[No response from model]"
                 output += f"### {role} Output\n{out}\n\n---\n\n"
                 previous = out
 
@@ -98,6 +119,7 @@ class CustomCrewThread(QThread):
                 self.finished.emit(output)
             else:
                 self.finished.emit("")
+
         except Exception as e:
             self.error.emit(str(e))
 
@@ -228,13 +250,12 @@ class OllamaGUI(QMainWindow):
         self.new_chat_btn.clicked.connect(self.new_chat)
         left.addWidget(self.new_chat_btn)
 
-        # ========== নতুন যোগ করা সার্চ বার ==========
+        # সার্চ বার
         self.chat_search = QLineEdit()
         self.chat_search.setPlaceholderText("🔍 Search chats...")
         self.chat_search.setClearButtonEnabled(True)
         self.chat_search.textChanged.connect(self.filter_conversations)
         left.addWidget(self.chat_search)
-        # ============================================
 
         self.conv_list = QListWidget()
         self.conv_list.itemClicked.connect(self.load_conversation)
@@ -330,13 +351,12 @@ class OllamaGUI(QMainWindow):
         main.addLayout(right)
         self.apply_theme()
 
-    # ========== সার্চ ফিল্টার ফাংশন ==========
+    # ========== সার্চ ফিল্টার ==========
     def filter_conversations(self):
         search_text = self.chat_search.text().strip().lower()
         self.conv_list.clear()
 
         all_convos = self.db.list_conversations()
-        # পিনড চ্যাট আগে, তারপর নতুন থেকে পুরাতন
         sorted_convos = sorted(
             all_convos,
             key=lambda x: (not x.get("pinned", False), -x.get("id", 0))
@@ -351,38 +371,13 @@ class OllamaGUI(QMainWindow):
                 item.setData(Qt.UserRole, c["id"])
                 self.conv_list.addItem(item)
 
-    # ========== refresh_conversations আপডেট ==========
     def refresh_conversations(self):
-        # সার্চ বার ক্লিয়ার করা যায় (অপশনাল), অথবা রাখা যায়
-        # self.chat_search.clear()  # চাইলে আনকমেন্ট করো
-        self.filter_conversations()  # এখন এটাই সব দেখাবে
-
-    # বাকি সব মেথড অপরিবর্তিত...
-
-    def attach_image(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
-        )
-        if not path:
-            return
-
-        self.input.clear()
-        cursor = self.input.textCursor()
-        cursor.insertHtml(f'<img src="{path}" width="400" /><br>')
-        self.input.setTextCursor(cursor)
-
-        self.attached_image_path = path
-        with open(path, "rb") as f:
-            self.attached_image_base64 = base64.b64encode(f.read()).decode('utf-8')
-
-        self.chat.append("\n📎 Image attached – will be sent with the next message.\n")
+        self.filter_conversations()
 
     def stop_or_reload(self):
         if self.thread and self.thread.isRunning():
             if hasattr(self.thread, 'stop'):
                 self.thread.stop()
-            self.thread.terminate()
-            self.thread.wait()
             self.chat.append("\n⚠️ Generation stopped by user.\n")
             self.update_stop_reload_button(is_running=False)
         else:
@@ -408,6 +403,27 @@ class OllamaGUI(QMainWindow):
         else:
             self.current_crew_btn.setText("📋 No Crew Selected")
             self.current_crew_btn.setStyleSheet("")
+
+    def load_models(self):
+        self.models = []
+        self.model_box.clear()
+        try:
+            r = requests.get("http://localhost:11434/api/tags", timeout=5)
+            if r.status_code != 200:
+                raise Exception("Ollama server not responding")
+            models_data = r.json().get("models", [])
+            if not models_data:
+                raise Exception("No models pulled")
+            for m in models_data:
+                name = m["name"]
+                self.models.append(name)
+                self.model_box.addItem(name)
+        except Exception as e:
+            fallback = "qwen2.5:latest"
+            self.models.append(fallback)
+            self.model_box.addItem(fallback + " (fallback)")
+            self.chat.append(f"\n⚠️ <b>Ollama connection failed:</b> {str(e)}\n")
+            self.chat.append("🔄 Using fallback model. Please start Ollama server and restart BOFFIN.\n")
 
     # ================= CREW METHODS =================
     def refresh_crews_list(self):
@@ -513,19 +529,23 @@ class OllamaGUI(QMainWindow):
         self.advanced_mode = not self.advanced_mode
         self.mode_btn.setText(f"⚡ Crew Mode: {'ON' if self.advanced_mode else 'OFF'}")
 
-    def load_models(self):
-        self.models = []
-        self.model_box.clear()
-        try:
-            r = requests.get("http://localhost:11434/api/tags", timeout=5)
-            for m in r.json().get("models", []):
-                name = m["name"]
-                self.models.append(name)
-                self.model_box.addItem(name)
-        except:
-            fb = "qwen2.5:latest"
-            self.models.append(fb)
-            self.model_box.addItem(fb + " (fallback)")
+    def attach_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp)"
+        )
+        if not path:
+            return
+
+        self.input.clear()
+        cursor = self.input.textCursor()
+        cursor.insertHtml(f'<img src="{path}" width="400" /><br>')
+        self.input.setTextCursor(cursor)
+
+        self.attached_image_path = path
+        with open(path, "rb") as f:
+            self.attached_image_base64 = base64.b64encode(f.read()).decode('utf-8')
+
+        self.chat.append("\n📎 Image attached – will be sent with the next message.\n")
 
     def send(self):
         prompt = self.input.toPlainText().strip()
@@ -593,7 +613,6 @@ class OllamaGUI(QMainWindow):
         self.chat.setTextCursor(cursor)
         self.chat.ensureCursorVisible()
         
-        # Force scroll to bottom
         scrollbar = self.chat.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
