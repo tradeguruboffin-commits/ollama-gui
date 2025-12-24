@@ -1,17 +1,27 @@
 #!/bin/bash
 
 # ------------------------------------------------------------
-# Ollama GUI Update & Environment Setup Script
-# ------------------------------------------------------------
-# This script:
-# 1. Navigates to the Ollama-GUI installation directory
-# 2. Checks for an active internet connection
-# 3. Updates the Ollama-GUI source code from GitHub (if online)
-# 4. Runs the Ollama-GUI environment setup script
+# Ollama GUI Environment Setup Script
 # ------------------------------------------------------------
 
+# Function to close database and Olama when quitting
+cleanup() {
+    echo -e "\n🛑 Stopping services..."
+    
+    # Stopping PostgreSQL
+    /usr/lib/postgresql/17/bin/pg_ctl -D /home/debian/projects/postgres/data stop
+    
+    # Stopping the Ollama process
+    killall ollama 2>/dev/null
+    
+    echo "✅ Services stopped. Goodbye!"
+    exit
+}
 
-# First of all start DataBase
+# The cleanup function will run when the script is stopped by a signal (CTRL+C or window close).
+trap cleanup EXIT SIGINT SIGTERM
+
+# Start Postgres DataBase
 echo "🐘 Checking PostgreSQL status..."
 
 if /usr/lib/postgresql/17/bin/pg_isready &> /dev/null; then

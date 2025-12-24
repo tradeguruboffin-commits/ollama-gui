@@ -3,6 +3,8 @@ import sys
 import json
 import requests
 import base64
+import os   # নতুন যোগ করা — subprocess এর জন্য
+import subprocess  # নতুন যোগ করা
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
@@ -104,7 +106,7 @@ class CustomCrewThread(QThread):
                 agent_thread.error.connect(self.error)
 
                 agent_thread.start()
-                agent_thread.wait()  # পরবর্তী এজেন্টের জন্য output দরকার → অপেক্ষা করতেই হবে
+                agent_thread.wait()
 
                 if not self.running:
                     break
@@ -296,12 +298,24 @@ class OllamaGUI(QMainWindow):
         self.theme_btn = QPushButton("🌙 Theme")
         self.theme_btn.clicked.connect(self.toggle_theme)
 
+        # ========== নতুন যোগ করা: Ollama Model Manager বাটন ==========
+        self.manager_btn = QPushButton("🦙 Manage Models")
+        self.manager_btn.clicked.connect(self.open_model_manager)
+        self.manager_btn.setStyleSheet("""
+            background: #1a5f1a; color: white; font-weight: bold;
+            padding: 12px; border-radius: 8px; font-size: 16px;
+        """)
+        self.manager_btn.setMinimumHeight(50)
+
         top.addWidget(QLabel("Single Model:"))
         top.addWidget(self.model_box)
         top.addStretch()
         top.addWidget(self.mode_btn)
         top.addWidget(self.current_crew_btn)
         top.addWidget(self.theme_btn)
+        top.addWidget(self.manager_btn)  # এখানে যোগ করা হলো
+        # ============================================================
+
         right.addLayout(top)
 
         self.chat = QTextEdit()
@@ -350,6 +364,24 @@ class OllamaGUI(QMainWindow):
 
         main.addLayout(right)
         self.apply_theme()
+
+    # ========== নতুন ফাংশন: Ollama Manager খোলা ==========
+    def open_model_manager(self):
+        manager_file = "ollama_manager.py"
+        if not os.path.exists(manager_file):
+            self.chat.append("\n❌ <b>ollama_manager.py</b> file not found in the same folder!\n")
+            QMessageBox.critical(self, "File Missing", f"Please place <b>{manager_file}</b> in the same directory as this app.")
+            return
+
+        try:
+            # আলাদা প্রসেসে ollama_manager.py চালানো
+            subprocess.Popen([sys.executable, manager_file], cwd=os.path.dirname(__file__) or ".")
+            self.chat.append("\n🦙 <b>Ollama Model Manager</b> opened in a new window!\n")
+            self.chat.append("   Use it to pull, create, or remove models.\n")
+        except Exception as e:
+            self.chat.append(f"\n❌ Failed to open Model Manager: {str(e)}\n")
+            QMessageBox.critical(self, "Error", f"Could not launch ollama_manager.py:\n{str(e)}")
+    # ========================================================
 
     # ========== সার্চ ফিল্টার ==========
     def filter_conversations(self):
@@ -426,6 +458,8 @@ class OllamaGUI(QMainWindow):
             self.chat.append("🔄 Using fallback model. Please start Ollama server and restart BOFFIN.\n")
 
     # ================= CREW METHODS =================
+    # (সব অপরিবর্তিত — নিচে কপি করা হয়েছে)
+
     def refresh_crews_list(self):
         self.crew_list.clear()
         crews = self.db.list_crews()
