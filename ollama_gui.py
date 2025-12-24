@@ -212,7 +212,7 @@ class CrewConfigDialog(QDialog):
 class OllamaGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BOFFIN • Ollama Local AI (Multi-Crew Manager)")
+        self.setWindowTitle("BOFFIN • Local AI (Multi-Crew Manager)")
         self.resize(1700, 900)
 
         self.db = PostgresDB()
