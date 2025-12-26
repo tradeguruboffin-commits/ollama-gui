@@ -16,7 +16,7 @@ class OllamaManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🦙 Ollama Model Manager")
-        self.resize(1200, 780)
+        self.resize(1700, 700)  # তোমার চাওয়া সাইজ
         self.process = None
         self.server_ready = False
         self.current_modelfile_path = None
@@ -27,111 +27,125 @@ class OllamaManager(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
+        layout.setSpacing(30)
+        layout.setContentsMargins(20, 20, 20, 20)
 
         # Left Panel
         left = QVBoxLayout()
-        left.setSpacing(20)
+        left.setSpacing(30)
 
         self.status_label = QLabel("🔴 Ollama Server: Checking...")
-        self.status_label.setStyleSheet("font-size: 20px; font-weight: bold; padding: 12px;")
+        self.status_label.setStyleSheet("font-size: 32px; font-weight: bold; padding: 20px;")
+        self.status_label.setAlignment(Qt.AlignCenter)
         left.addWidget(self.status_label)
 
         self.serve_btn = QPushButton("▶️ Start Ollama Serve")
         self.serve_btn.clicked.connect(self.toggle_serve)
-        self.serve_btn.setStyleSheet("padding: 16px; font-size: 18px;")
+        self.serve_btn.setStyleSheet("padding: 20px; font-size: 30px;")
+        self.serve_btn.setMinimumHeight(80)
         left.addWidget(self.serve_btn)
 
         self.refresh_btn = QPushButton("🔄 Refresh Model List")
         self.refresh_btn.clicked.connect(self.load_models)
         self.refresh_btn.setEnabled(False)
-        self.refresh_btn.setStyleSheet("padding: 14px; font-size: 16px;")
+        self.refresh_btn.setStyleSheet("padding: 18px; font-size: 28px;")
+        self.refresh_btn.setMinimumHeight(70)
         left.addWidget(self.refresh_btn)
 
         # Pull Model
         pull_layout = QHBoxLayout()
+        pull_layout.setSpacing(15)
         self.pull_input = QLineEdit()
         self.pull_input.setPlaceholderText("e.g. llama3.2, qwen2.5:7b, gemma2...")
-        self.pull_input.setStyleSheet("font-size: 16px; padding: 10px;")
-        pull_layout.addWidget(self.pull_input)
+        self.pull_input.setStyleSheet("font-size: 28px; padding: 15px;")
+        self.pull_input.setMinimumHeight(70)
+        pull_layout.addWidget(self.pull_input, 3)
         self.pull_btn = QPushButton("⬇️ Pull")
         self.pull_btn.clicked.connect(self.pull_model)
-        self.pull_btn.setStyleSheet("padding: 12px; font-size: 16px;")
-        pull_layout.addWidget(self.pull_btn)
+        self.pull_btn.setStyleSheet("padding: 20px; font-size: 30px;")
+        self.pull_btn.setMinimumHeight(70)
+        pull_layout.addWidget(self.pull_btn, 1)
         left.addLayout(pull_layout)
 
         # Create Custom Model
         create_name_layout = QHBoxLayout()
+        create_name_layout.setSpacing(15)
         self.create_name = QLineEdit()
         self.create_name.setPlaceholderText("Custom model name (e.g. my-llama3)")
-        self.create_name.setStyleSheet("font-size: 16px; padding: 10px;")
-        create_name_layout.addWidget(self.create_name)
+        self.create_name.setStyleSheet("font-size: 28px; padding: 15px;")
+        self.create_name.setMinimumHeight(70)
+        create_name_layout.addWidget(self.create_name, 3)
 
         self.create_btn = QPushButton("🛠️ Create Model")
         self.create_btn.clicked.connect(self.create_model)
         self.create_btn.setEnabled(False)
-        self.create_btn.setStyleSheet("padding: 14px; font-size: 18px;")
-        create_name_layout.addWidget(self.create_btn)
+        self.create_btn.setStyleSheet("padding: 20px; font-size: 30px;")
+        self.create_btn.setMinimumHeight(70)
+        create_name_layout.addWidget(self.create_btn, 1)
         left.addLayout(create_name_layout)
 
-        # Modelfile Browse Button
+        # Modelfile Browse
         modelfile_btn_layout = QHBoxLayout()
+        modelfile_btn_layout.setSpacing(15)
         self.modelfile_path_label = QLabel("No Modelfile selected")
-        self.modelfile_path_label.setStyleSheet("font-size: 14px; color: #8b949e;")
+        self.modelfile_path_label.setStyleSheet("font-size: 26px; color: #8b949e;")
         modelfile_btn_layout.addWidget(self.modelfile_path_label)
 
         self.browse_modelfile_btn = QPushButton("📂 Browse Modelfile")
         self.browse_modelfile_btn.clicked.connect(self.browse_modelfile)
-        self.browse_modelfile_btn.setStyleSheet("padding: 12px; font-size: 16px;")
+        self.browse_modelfile_btn.setStyleSheet("padding: 18px; font-size: 28px;")
+        self.browse_modelfile_btn.setMinimumHeight(70)
         modelfile_btn_layout.addWidget(self.browse_modelfile_btn)
         left.addLayout(modelfile_btn_layout)
 
         # Modelfile Editor
-        left.addWidget(QLabel("📄 Modelfile Content:"))
+        left.addWidget(QLabel("📄 Modelfile Content:"), alignment=Qt.AlignCenter)
         self.modelfile_edit = QTextEdit()
         self.modelfile_edit.setPlaceholderText("""# Example Modelfile
 FROM llama3.2
 PARAMETER temperature 0.8
 SYSTEM You are a helpful assistant.""")
         self.modelfile_edit.textChanged.connect(self.on_modelfile_changed)
-        self.modelfile_edit.setStyleSheet("font-size: 16px;")
-        left.addWidget(self.modelfile_edit)
-
-        left.addStretch()
+        self.modelfile_edit.setStyleSheet("font-size: 26px;")
+        left.addWidget(self.modelfile_edit, 1)
 
         # Right Panel
         right = QVBoxLayout()
-        right.setSpacing(15)
+        right.setSpacing(25)
 
         right.addWidget(QLabel("<b>📋 Available Models</b>"), alignment=Qt.AlignCenter)
 
         self.model_list = QListWidget()
         self.model_list.itemClicked.connect(self.on_model_select)
-        right.addWidget(self.model_list)
+        right.addWidget(self.model_list, 1)
 
         right.addWidget(QLabel("<b>📜 Output Log</b>"), alignment=Qt.AlignCenter)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        right.addWidget(self.log_area)
+        right.addWidget(self.log_area, 1)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
+        self.progress.setMinimumHeight(50)
         right.addWidget(self.progress)
 
         del_layout = QHBoxLayout()
+        del_layout.setSpacing(20)
         self.selected_label = QLabel("No model selected")
-        self.selected_label.setStyleSheet("font-size: 16px;")
+        self.selected_label.setStyleSheet("font-size: 28px;")
         del_layout.addWidget(self.selected_label)
         self.rm_btn = QPushButton("🗑️ Remove")
         self.rm_btn.clicked.connect(self.remove_model)
         self.rm_btn.setEnabled(False)
-        self.rm_btn.setStyleSheet("padding: 12px; font-size: 16px;")
+        self.rm_btn.setStyleSheet("padding: 20px; font-size: 30px;")
+        self.rm_btn.setMinimumHeight(70)
         del_layout.addWidget(self.rm_btn)
         right.addLayout(del_layout)
 
-        # Assemble
+        # Assemble panels
         left_widget = QWidget()
         left_widget.setLayout(left)
-        left_widget.setFixedWidth(460)
+        left_widget.setMinimumWidth(520)
         layout.addWidget(left_widget)
 
         right_widget = QWidget()
@@ -143,41 +157,41 @@ SYSTEM You are a helpful assistant.""")
     def apply_theme(self):
         self.setStyleSheet("""
             QMainWindow { background: #0d1117; color: #c9d1d9; }
-            QLabel { color: #c9d1d9; font-size: 16px; }
+            QLabel { color: #c9d1d9; font-size: 30px; font-weight: bold; }
             QPushButton {
-                background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
-                padding: 12px; border-radius: 10px; font-size: 16px;
+                background: #21262d; color: #c9d1d9; border: 2px solid #30363d;
+                padding: 20px; border-radius: 15px; font-size: 30px;
             }
             QPushButton:hover { background: #30363d; }
             QPushButton:pressed { background: #444c56; }
             QPushButton:disabled { background: #161b22; color: #6e7681; }
             QLineEdit, QTextEdit {
-                background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
-                padding: 12px; border-radius: 8px; font-size: 16px;
+                background: #161b22; color: #c9d1d9; border: 2px solid #30363d;
+                padding: 20px; border-radius: 12px; font-size: 28px;
             }
             QListWidget {
-                background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
-                border-radius: 10px; font-size: 16px; padding: 8px;
+                background: #161b22; color: #c9d1d9; border: 2px solid #30363d;
+                border-radius: 15px; font-size: 28px; padding: 15px;
             }
             QListWidget::item {
-                padding: 16px 10px; min-height: 40px; border-bottom: 1px solid #21262d;
+                padding: 25px 15px; min-height: 70px; border-bottom: 2px solid #21262d;
             }
             QListWidget::item:selected {
                 background: #264f78; color: white; font-weight: bold;
             }
             QListWidget::item:hover {
-                background: #1f6feb40;
+                background: #1f6feb50;
             }
             QProgressBar {
-                border: 1px solid #30363d; border-radius: 8px; text-align: center;
-                background: #161b22; font-size: 14px;
+                border: 2px solid #30363d; border-radius: 12px; text-align: center;
+                background: #161b22; font-size: 26px; min-height: 50px;
             }
             QProgressBar::chunk { background: #238636; }
         """)
 
         self.log_area.setStyleSheet("""
             background: #0d1117; color: #58a6ff;
-            font-family: Consolas, Monaco, monospace; font-size: 15px;
+            font-family: Consolas, Monaco, monospace; font-size: 26px; padding: 20px;
         """)
 
     def log(self, text):
