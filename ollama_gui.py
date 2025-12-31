@@ -80,7 +80,7 @@ class CustomCrewThread(QThread):
 
     def run(self):
         try:
-            output = "# BOFFIN CUSTOM CREW REPORT\n\n"
+            output = "# OLLAMA CUSTOM CREW REPORT\n\n"
             output += f"**User Request:** {self.user_prompt}\n\n---\n\n"
             context = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in self.history_messages])
             previous = f"{context}\nUSER: {self.user_prompt}"
@@ -214,7 +214,7 @@ class CrewConfigDialog(QDialog):
 class OllamaGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BOFFIN • Local AI (Multi-Crew Manager)")
+        self.setWindowTitle("OLLAMA • Local AI (Multi-Crew Manager)")
         self.resize(1700, 900)
 
         self.db = PostgresDB()
