@@ -7,23 +7,23 @@ import os
 import requests
 import re
 import tempfile
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QListWidget, QLineEdit,
-    QMessageBox, QProgressBar, QFileDialog
+    QMessageBox, QProgressBar, QFileDialog, QFrame
 )
 
 class OllamaManager(QMainWindow):
-    # Signals for thread-safe GUI updates
     log_signal = pyqtSignal(str)
-    progress_signal = pyqtSignal(bool)
-    status_update_signal = pyqtSignal(str, str)  # text, color
+    progress_signal = pyqtSignal(int)  # 0-100
+    progress_visible_signal = pyqtSignal(bool)
+    auth_status_signal = pyqtSignal(str, str)  # text, color
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🦙 Ollama Manager")
-        self.resize(2100, 700)
+        self.resize(2500, 900)
         self.process = None
         self.server_ready = False
         self.current_modelfile_path = None
@@ -31,33 +31,23 @@ class OllamaManager(QMainWindow):
         self.is_signed_in = False
         self.init_ui()
 
-        # Connect signals
         self.log_signal.connect(self.append_log)
-        self.progress_signal.connect(self.set_progress_visible)
-        self.status_update_signal.connect(self.update_auth_status)
+        self.progress_signal.connect(self.progress.setValue)
+        self.progress_visible_signal.connect(self.progress.setVisible)
+        self.auth_status_signal.connect(self.update_auth_label)
 
         QTimer.singleShot(100, self.check_server_status)
-
-    def append_log(self, text):
-        self.log_area.append(text)
-        self.log_area.ensureCursorVisible()
-
-    def set_progress_visible(self, visible):
-        self.progress.setVisible(visible)
-
-    def update_auth_status(self, text, color):
-        self.auth_status_label.setText(text)
-        self.auth_status_label.setStyleSheet(f"font-size: 28px; color: {color}; padding: 10px;")
 
     def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
-        layout.setSpacing(30)
-        layout.setContentsMargins(20, 20, 20, 20)
+        main_layout = QHBoxLayout(central)
+        main_layout.setSpacing(30)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
+        # Left Panel
         left = QVBoxLayout()
-        left.setSpacing(30)
+        left.setSpacing(25)
 
         self.status_label = QLabel("🔴 Ollama Server: Checking...")
         self.status_label.setStyleSheet("font-size: 32px; font-weight: bold; padding: 20px;")
@@ -118,6 +108,7 @@ class OllamaManager(QMainWindow):
         self.create_name.setPlaceholderText("Custom model name (e.g. username/my-llama3)")
         self.create_name.setStyleSheet("font-size: 28px; padding: 15px;")
         self.create_name.setMinimumHeight(70)
+        self.create_name.textChanged.connect(self.check_create_button)  # <-- নতুন যোগ
         create_name_layout.addWidget(self.create_name, 3)
 
         self.create_btn = QPushButton("🛠️ Create Model")
@@ -147,59 +138,77 @@ class OllamaManager(QMainWindow):
 FROM llama3.2
 PARAMETER temperature 0.8
 SYSTEM You are a helpful assistant.""")
-        self.modelfile_edit.textChanged.connect(self.on_modelfile_changed)
+        self.modelfile_edit.textChanged.connect(self.check_create_button)
         self.modelfile_edit.setStyleSheet("font-size: 26px;")
         left.addWidget(self.modelfile_edit, 1)
 
+        # Right Panel - Models List + Details
         right = QVBoxLayout()
-        right.setSpacing(25)
+        right.setSpacing(20)
 
         right.addWidget(QLabel("<b>📋 Available Models</b>"), alignment=Qt.AlignCenter)
 
         self.model_list = QListWidget()
         self.model_list.itemClicked.connect(self.on_model_select)
-        right.addWidget(self.model_list, 1)
+        right.addWidget(self.model_list, 2)
+
+        # Model Details Panel
+        details_frame = QFrame()
+        details_frame.setFrameShape(QFrame.StyledPanel)
+        details_frame.setStyleSheet("background: #161b22; border: 2px solid #30363d; border-radius: 15px; padding: 15px;")
+        details_layout = QVBoxLayout(details_frame)
+        details_layout.addWidget(QLabel("<b>📄 Model Details</b>"), alignment=Qt.AlignCenter)
+        self.details_text = QTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setStyleSheet("background: #0d1117; color: #c9d1d9; font-size: 24px;")
+        self.details_text.setMinimumHeight(200)
+        self.details_text.setPlaceholderText("Select a model to see details...")
+        details_layout.addWidget(self.details_text)
+        right.addWidget(details_frame, 1)
 
         right.addWidget(QLabel("<b>📜 Output Log</b>"), alignment=Qt.AlignCenter)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        right.addWidget(self.log_area, 1)
+        right.addWidget(self.log_area, 2)
 
         self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(True)
+        self.progress.setStyleSheet("font-size: 26px; min-height: 60px;")
         self.progress.setVisible(False)
-        self.progress.setMinimumHeight(50)
         right.addWidget(self.progress)
 
-        del_layout = QHBoxLayout()
-        del_layout.setSpacing(20)
+        # Bottom buttons on right
+        bottom_right = QHBoxLayout()
+        bottom_right.setSpacing(20)
         self.selected_label = QLabel("No model selected")
         self.selected_label.setStyleSheet("font-size: 28px;")
-        del_layout.addWidget(self.selected_label)
+        bottom_right.addWidget(self.selected_label)
 
         self.rm_btn = QPushButton("🗑️ Remove")
         self.rm_btn.clicked.connect(self.remove_model)
         self.rm_btn.setEnabled(False)
         self.rm_btn.setStyleSheet("padding: 20px; font-size: 30px;")
         self.rm_btn.setMinimumHeight(70)
-        del_layout.addWidget(self.rm_btn)
+        bottom_right.addWidget(self.rm_btn)
 
         self.push_btn = QPushButton("⬆️ Push to ollama.com")
         self.push_btn.clicked.connect(self.push_model)
         self.push_btn.setEnabled(False)
         self.push_btn.setStyleSheet("padding: 20px; font-size: 30px;")
         self.push_btn.setMinimumHeight(70)
-        del_layout.addWidget(self.push_btn)
+        bottom_right.addWidget(self.push_btn)
 
-        right.addLayout(del_layout)
+        right.addLayout(bottom_right)
 
         left_widget = QWidget()
         left_widget.setLayout(left)
-        left_widget.setMinimumWidth(520)
-        layout.addWidget(left_widget)
+        left_widget.setMinimumWidth(550)
+        main_layout.addWidget(left_widget)
 
         right_widget = QWidget()
         right_widget.setLayout(right)
-        layout.addWidget(right_widget, 1)
+        main_layout.addWidget(right_widget, 1)
 
         self.apply_theme()
 
@@ -228,12 +237,9 @@ SYSTEM You are a helpful assistant.""")
             QListWidget::item:selected {
                 background: #264f78; color: white; font-weight: bold;
             }
-            QListWidget::item:hover {
-                background: #1f6feb50;
-            }
             QProgressBar {
                 border: 2px solid #30363d; border-radius: 12px; text-align: center;
-                background: #161b22; font-size: 26px; min-height: 50px;
+                background: #161b22; font-size: 28px; min-height: 60px;
             }
             QProgressBar::chunk { background: #238636; }
         """)
@@ -242,6 +248,14 @@ SYSTEM You are a helpful assistant.""")
             background: #0d1117; color: #58a6ff;
             font-family: Consolas, Monaco, monospace; font-size: 26px; padding: 20px;
         """)
+
+    def append_log(self, text):
+        self.log_area.append(text)
+        self.log_area.ensureCursorVisible()
+
+    def update_auth_label(self, text, color):
+        self.auth_status_label.setText(text)
+        self.auth_status_label.setStyleSheet(f"font-size: 28px; color: {color}; padding: 10px;")
 
     def is_server_running(self):
         try:
@@ -271,6 +285,11 @@ SYSTEM You are a helpful assistant.""")
         if self.server_ready:
             if self.process:
                 self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()  # <-- Force kill if terminate fails
+                    self.log_signal.emit("🔴 Force killed ollama serve")
                 self.process = None
             self.log_signal.emit("🛑 Ollama serve stopped.")
             self.check_server_status()
@@ -338,11 +357,29 @@ SYSTEM You are a helpful assistant.""")
         self.rm_btn.setEnabled(True)
         self.current_selected_model = model_name
         self.update_push_button()
+        self.show_model_details(model_name)
+
+    def show_model_details(self, model_name):
+        try:
+            response = requests.post("http://localhost:11434/api/show", json={"name": model_name})
+            if response.status_code == 200:
+                info = response.json()
+                details = f"<b>Model:</b> {info.get('modelfile', '').split('FROM ')[1].split('\n')[0] if 'FROM ' in info.get('modelfile', '') else model_name}<br>"
+                details += f"<b>Parameters:</b> {info.get('parameters', 'Unknown')}<br>"
+                details += f"<b>Template:</b> {info.get('template', 'Unknown')[:100]}...<br>"
+                details += f"<b>Digest:</b> {info.get('digest', 'Unknown')[:20]}...<br>"
+                details += f"<b>Size:</b> {self.format_size(info.get('size', 0))}<br>"
+                details += f"<b>Quantization:</b> {info.get('quantization', 'Unknown')}"
+                self.details_text.setHtml(details)
+            else:
+                self.details_text.setText("Failed to load details")
+        except:
+            self.details_text.setText("Server not responding")
 
     def update_push_button(self):
-        if not hasattr(self, 'push_btn') or not self.push_btn:
+        if not hasattr(self, 'push_btn'):
             return
-        has_model = bool(hasattr(self, 'current_selected_model') and self.current_selected_model)
+        has_model = bool(self.current_selected_model)
         has_username = has_model and '/' in self.current_selected_model
         enabled = has_username and self.is_signed_in
         self.push_btn.setEnabled(enabled)
@@ -355,13 +392,13 @@ SYSTEM You are a helpful assistant.""")
         if match:
             username = match.group(1)
             self.log_signal.emit(f"✅ Already signed in as: {username}")
-            self.status_update_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
+            self.auth_status_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
             self.signin_btn.setEnabled(False)
             self.signout_btn.setEnabled(True)
             self.is_signed_in = True
         else:
             self.log_signal.emit("🔴 Not signed in.")
-            self.status_update_signal.emit("🔴 Not signed in to ollama.com", "#ff5555")
+            self.auth_status_signal.emit("🔴 Not signed in to ollama.com", "#ff5555")
             self.is_signed_in = False
         self.update_push_button()
 
@@ -374,7 +411,7 @@ SYSTEM You are a helpful assistant.""")
         if match:
             username = match.group(1)
             self.log_signal.emit(f"✅ Already signed in as: {username}")
-            self.status_update_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
+            self.auth_status_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
             self.signin_btn.setEnabled(False)
             self.signout_btn.setEnabled(True)
             self.is_signed_in = True
@@ -393,7 +430,7 @@ SYSTEM You are a helpful assistant.""")
             except:
                 self.log_signal.emit("   ⚠️ Auto-open failed. Copy URL manually.")
 
-            self.status_update_signal.emit("🟡 Pending: Complete in browser", "#fbbc05")
+            self.auth_status_signal.emit("🟡 Pending: Complete in browser", "#fbbc05")
             self.signin_btn.setEnabled(False)
             self.signout_btn.setEnabled(True)
             self.is_signed_in = False
@@ -403,10 +440,6 @@ SYSTEM You are a helpful assistant.""")
             self.auth_poll_timer = QTimer()
             self.auth_poll_timer.timeout.connect(self.check_auth_status)
             self.auth_poll_timer.start(3000)
-        else:
-            self.log_signal.emit("❌ Unexpected response from signin.")
-            self.log_signal.emit(f"   Output: {result.stdout.strip()}")
-            self.log_signal.emit(f"   Error: {result.stderr.strip()}")
 
     def check_auth_status(self):
         result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
@@ -415,7 +448,7 @@ SYSTEM You are a helpful assistant.""")
         if match:
             username = match.group(1)
             self.log_signal.emit("✅ Authentication completed!")
-            self.status_update_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
+            self.auth_status_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
             self.is_signed_in = True
             self.update_push_button()
             self.auth_poll_timer.stop()
@@ -426,7 +459,7 @@ SYSTEM You are a helpful assistant.""")
             result = subprocess.run(["ollama", "signout"], capture_output=True, text=True)
             if result.returncode == 0:
                 self.log_signal.emit("🚪 Signed out successfully.")
-                self.status_update_signal.emit("🔴 Not signed in to ollama.com", "#ff5555")
+                self.auth_status_signal.emit("🔴 Not signed in to ollama.com", "#ff5555")
                 self.signin_btn.setEnabled(True)
                 self.signout_btn.setEnabled(False)
                 self.is_signed_in = False
@@ -439,28 +472,71 @@ SYSTEM You are a helpful assistant.""")
     def push_model(self):
         model = self.current_selected_model
         if '/' not in model:
-            QMessageBox.warning(self, "Warning", "Model name must include username (e.g. username/my-model)")
+            QMessageBox.warning(self, "Warning", "Model name must include username")
             return
 
-        self.progress_signal.emit(True)
+        self.progress_visible_signal.emit(True)
+        self.progress_signal.emit(0)
         self.log_signal.emit(f"⬆️ Pushing {model}...")
 
         def push():
             try:
-                proc = subprocess.Popen(["ollama", "push", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                for line in proc.stdout:
-                    self.log_signal.emit(line.strip())
-                proc.wait()
-                if proc.returncode == 0:
+                proc = subprocess.Popen(["ollama", "push", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_lines=True)
+                for line in proc:
+                    line = line.strip()
+                    if line:
+                        self.log_signal.emit(line)
+                        # Parse percentage
+                        m = re.search(r"(\d+)%", line)
+                        if m:
+                            self.progress_signal.emit(int(m.group(1)))
+                returncode = proc.wait()
+                if returncode == 0:
                     self.log_signal.emit(f"✅ {model} pushed successfully!")
                 else:
-                    self.log_signal.emit("❌ Push failed")
+                    self.log_signal.emit(f"❌ Push failed (code: {returncode})")
             except Exception as e:
                 self.log_signal.emit(f"❌ Error: {e}")
             finally:
-                self.progress_signal.emit(False)
+                self.progress_visible_signal.emit(False)
 
         threading.Thread(target=push, daemon=True).start()
+
+    def pull_model(self):
+        model = self.pull_input.text().strip()
+        if not model:
+            QMessageBox.warning(self, "Error", "Enter a model name!")
+            return
+        if not self.server_ready:
+            QMessageBox.warning(self, "Error", "Start server first!")
+            return
+
+        self.progress_visible_signal.emit(True)
+        self.progress_signal.emit(0)
+        self.log_signal.emit(f"⬇️ Pulling {model}...")
+
+        def pull():
+            try:
+                proc = subprocess.Popen(["ollama", "pull", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_lines=True)
+                for line in proc:
+                    line = line.strip()
+                    if line:
+                        self.log_signal.emit(line)
+                        m = re.search(r"(\d+)%", line)
+                        if m:
+                            self.progress_signal.emit(int(m.group(1)))
+                returncode = proc.wait()
+                if returncode == 0:
+                    self.log_signal.emit(f"✅ {model} pulled successfully!")
+                    self.load_models()
+                else:
+                    self.log_signal.emit(f"❌ Pull failed (code: {returncode})")
+            except Exception as e:
+                self.log_signal.emit(f"❌ Error: {e}")
+            finally:
+                self.progress_visible_signal.emit(False)
+
+        threading.Thread(target=pull, daemon=True).start()
 
     def browse_modelfile(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Modelfile", "", "Modelfile (*);;All Files (*)")
@@ -504,33 +580,6 @@ SYSTEM You are a helpful assistant.""")
                 self.log_signal.emit(f"❌ Failed:\n{result.stderr}")
                 QMessageBox.critical(self, "Error", result.stderr or "Unknown")
 
-    def pull_model(self):
-        model = self.pull_input.text().strip()
-        if not model:
-            QMessageBox.warning(self, "Error", "Enter a model name!")
-            return
-        if not self.server_ready:
-            QMessageBox.warning(self, "Error", "Start server first!")
-            return
-
-        self.progress_signal.emit(True)
-        self.log_signal.emit(f"⬇️ Pulling {model}...")
-
-        def pull():
-            try:
-                proc = subprocess.Popen(["ollama", "pull", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                for line in proc.stdout:
-                    self.log_signal.emit(line.strip())
-                proc.wait()
-                self.log_signal.emit(f"✅ {model} pulled successfully!")
-                self.load_models()
-            except Exception as e:
-                self.log_signal.emit(f"❌ Error: {e}")
-            finally:
-                self.progress_signal.emit(False)
-
-        threading.Thread(target=pull, daemon=True).start()
-
     def remove_model(self):
         model = self.current_selected_model
         reply = QMessageBox.question(self, "Confirm", f"Permanently delete '{model}'?")
@@ -542,6 +591,7 @@ SYSTEM You are a helpful assistant.""")
                 self.selected_label.setText("No model selected")
                 self.rm_btn.setEnabled(False)
                 self.push_btn.setEnabled(False)
+                self.details_text.setText("Select a model to see details...")
             except Exception as e:
                 self.log_signal.emit(f"❌ {e}")
 
