@@ -6,7 +6,8 @@ import time
 import os
 import requests
 import re
-from PyQt5.QtCore import Qt, QTimer
+import tempfile
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QListWidget, QLineEdit,
@@ -14,10 +15,15 @@ from PyQt5.QtWidgets import (
 )
 
 class OllamaManager(QMainWindow):
+    # Signals for thread-safe GUI updates
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(bool)
+    status_update_signal = pyqtSignal(str, str)  # text, color
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("🦙 Ollama Model Manager")
-        self.resize(1700, 700)
+        self.setWindowTitle("🦙 Ollama Manager")
+        self.resize(2100, 700)
         self.process = None
         self.server_ready = False
         self.current_modelfile_path = None
@@ -25,7 +31,23 @@ class OllamaManager(QMainWindow):
         self.is_signed_in = False
         self.init_ui()
 
+        # Connect signals
+        self.log_signal.connect(self.append_log)
+        self.progress_signal.connect(self.set_progress_visible)
+        self.status_update_signal.connect(self.update_auth_status)
+
         QTimer.singleShot(100, self.check_server_status)
+
+    def append_log(self, text):
+        self.log_area.append(text)
+        self.log_area.ensureCursorVisible()
+
+    def set_progress_visible(self, visible):
+        self.progress.setVisible(visible)
+
+    def update_auth_status(self, text, color):
+        self.auth_status_label.setText(text)
+        self.auth_status_label.setStyleSheet(f"font-size: 28px; color: {color}; padding: 10px;")
 
     def init_ui(self):
         central = QWidget()
@@ -221,11 +243,6 @@ SYSTEM You are a helpful assistant.""")
             font-family: Consolas, Monaco, monospace; font-size: 26px; padding: 20px;
         """)
 
-    def log(self, text):
-        if hasattr(self, 'log_area') and self.log_area:
-            self.log_area.append(text)
-            self.log_area.ensureCursorVisible()
-
     def is_server_running(self):
         try:
             response = requests.get("http://localhost:11434/api/tags", timeout=4)
@@ -255,25 +272,27 @@ SYSTEM You are a helpful assistant.""")
             if self.process:
                 self.process.terminate()
                 self.process = None
-            self.log("🛑 Ollama serve stopped.")
+            self.log_signal.emit("🛑 Ollama serve stopped.")
             self.check_server_status()
         else:
-            def run_serve():
-                self.log("▶️ Starting ollama serve...")
-                self.process = subprocess.Popen(["ollama", "serve"])
-                for _ in range(30):
-                    time.sleep(1)
-                    if self.is_server_running():
-                        self.check_server_status()
-                        self.log("🟢 Ollama server ready!")
-                        return
-                self.log("⚠️ Server started but not responding. Try Refresh.")
+            thread = threading.Thread(target=self.run_serve_background)
+            thread.daemon = True
+            thread.start()
 
-            threading.Thread(target=run_serve, daemon=True).start()
+    def run_serve_background(self):
+        self.log_signal.emit("▶️ Starting ollama serve...")
+        self.process = subprocess.Popen(["ollama", "serve"])
+        for _ in range(30):
+            time.sleep(1)
+            if self.is_server_running():
+                self.check_server_status()
+                self.log_signal.emit("🟢 Ollama server ready!")
+                return
+        self.log_signal.emit("⚠️ Server started but not responding. Try Refresh.")
 
     def load_models(self):
         if not self.is_server_running():
-            self.log("⚠️ Server not responding.")
+            self.log_signal.emit("⚠️ Server not responding.")
             return
 
         self.model_list.clear()
@@ -293,9 +312,9 @@ SYSTEM You are a helpful assistant.""")
                 item_text = f"{name}  |  Size: {size_str}  |  Modified: {modified}"
                 self.model_list.addItem(item_text)
 
-            self.log(f"✅ Loaded {len(models)} models.")
+            self.log_signal.emit(f"✅ Loaded {len(models)} models.")
         except Exception as e:
-            self.log(f"❌ Failed to load models: {str(e)}")
+            self.log_signal.emit(f"❌ Failed to load models: {str(e)}")
 
     def format_size(self, size_bytes):
         if size_bytes == 0 or size_bytes is None:
@@ -329,35 +348,33 @@ SYSTEM You are a helpful assistant.""")
         self.push_btn.setEnabled(enabled)
 
     def check_initial_auth_status(self):
-        self.log("🔍 Checking initial authentication status...")
+        self.log_signal.emit("🔍 Checking initial authentication status...")
         result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
         full_output = result.stdout + result.stderr
-        # আরও নিরাপদ regex
         match = re.search(r"already signed in as user ['\"]?([a-zA-Z0-9_]+)['\"]?", full_output, re.IGNORECASE)
         if match:
             username = match.group(1)
-            self.log(f"✅ Already signed in as: {username}")
-            self.auth_status_label.setText(f"🟢 Signed in as {username}")
-            self.auth_status_label.setStyleSheet("font-size: 28px; color: #50fa7b; padding: 10px;")
+            self.log_signal.emit(f"✅ Already signed in as: {username}")
+            self.status_update_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
             self.signin_btn.setEnabled(False)
             self.signout_btn.setEnabled(True)
             self.is_signed_in = True
         else:
-            self.log("🔴 Not signed in.")
+            self.log_signal.emit("🔴 Not signed in.")
+            self.status_update_signal.emit("🔴 Not signed in to ollama.com", "#ff5555")
             self.is_signed_in = False
         self.update_push_button()
 
     def signin(self):
-        self.log("🔑 Checking sign-in status...")
+        self.log_signal.emit("🔑 Checking sign-in status...")
         result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
         full_output = result.stdout + result.stderr
 
         match = re.search(r"already signed in as user ['\"]?([a-zA-Z0-9_]+)['\"]?", full_output, re.IGNORECASE)
         if match:
             username = match.group(1)
-            self.log(f"✅ Already signed in as: {username}")
-            self.auth_status_label.setText(f"🟢 Signed in as {username}")
-            self.auth_status_label.setStyleSheet("font-size: 28px; color: #50fa7b; padding: 10px;")
+            self.log_signal.emit(f"✅ Already signed in as: {username}")
+            self.status_update_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
             self.signin_btn.setEnabled(False)
             self.signout_btn.setEnabled(True)
             self.is_signed_in = True
@@ -367,17 +384,16 @@ SYSTEM You are a helpful assistant.""")
         url_match = re.search(r"https?://[^\s]+", full_output)
         if url_match:
             url = url_match.group(0).strip()
-            self.log("   📎 Authentication required:")
-            self.log(f"   {url}")
-            self.log("   Opening browser...")
+            self.log_signal.emit("   📎 Authentication required:")
+            self.log_signal.emit(f"   {url}")
+            self.log_signal.emit("   Opening browser...")
             try:
                 subprocess.run(["xdg-open", url], check=False)
-                self.log("   🌐 Browser opened.")
+                self.log_signal.emit("   🌐 Browser opened.")
             except:
-                self.log("   ⚠️ Auto-open failed. Copy URL manually.")
+                self.log_signal.emit("   ⚠️ Auto-open failed. Copy URL manually.")
 
-            self.auth_status_label.setText("🟡 Pending: Complete in browser")
-            self.auth_status_label.setStyleSheet("font-size: 28px; color: #fbbc05; padding: 10px;")
+            self.status_update_signal.emit("🟡 Pending: Complete in browser", "#fbbc05")
             self.signin_btn.setEnabled(False)
             self.signout_btn.setEnabled(True)
             self.is_signed_in = False
@@ -388,9 +404,9 @@ SYSTEM You are a helpful assistant.""")
             self.auth_poll_timer.timeout.connect(self.check_auth_status)
             self.auth_poll_timer.start(3000)
         else:
-            self.log("❌ Unexpected response from signin.")
-            self.log(f"   Output: {result.stdout.strip()}")
-            self.log(f"   Error: {result.stderr.strip()}")
+            self.log_signal.emit("❌ Unexpected response from signin.")
+            self.log_signal.emit(f"   Output: {result.stdout.strip()}")
+            self.log_signal.emit(f"   Error: {result.stderr.strip()}")
 
     def check_auth_status(self):
         result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
@@ -398,9 +414,8 @@ SYSTEM You are a helpful assistant.""")
         match = re.search(r"already signed in as user ['\"]?([a-zA-Z0-9_]+)['\"]?", full, re.IGNORECASE)
         if match:
             username = match.group(1)
-            self.log("✅ Authentication completed!")
-            self.auth_status_label.setText(f"🟢 Signed in as {username}")
-            self.auth_status_label.setStyleSheet("font-size: 28px; color: #50fa7b; padding: 10px;")
+            self.log_signal.emit("✅ Authentication completed!")
+            self.status_update_signal.emit(f"🟢 Signed in as {username}", "#50fa7b")
             self.is_signed_in = True
             self.update_push_button()
             self.auth_poll_timer.stop()
@@ -410,9 +425,8 @@ SYSTEM You are a helpful assistant.""")
         if reply == QMessageBox.Yes:
             result = subprocess.run(["ollama", "signout"], capture_output=True, text=True)
             if result.returncode == 0:
-                self.log("🚪 Signed out successfully.")
-                self.auth_status_label.setText("🔴 Not signed in to ollama.com")
-                self.auth_status_label.setStyleSheet("font-size: 28px; color: #ff5555; padding: 10px;")
+                self.log_signal.emit("🚪 Signed out successfully.")
+                self.status_update_signal.emit("🔴 Not signed in to ollama.com", "#ff5555")
                 self.signin_btn.setEnabled(True)
                 self.signout_btn.setEnabled(False)
                 self.is_signed_in = False
@@ -420,7 +434,7 @@ SYSTEM You are a helpful assistant.""")
                 if hasattr(self, 'auth_poll_timer'):
                     self.auth_poll_timer.stop()
             else:
-                self.log(f"❌ Sign out failed: {result.stderr}")
+                self.log_signal.emit(f"❌ Sign out failed: {result.stderr}")
 
     def push_model(self):
         model = self.current_selected_model
@@ -428,24 +442,23 @@ SYSTEM You are a helpful assistant.""")
             QMessageBox.warning(self, "Warning", "Model name must include username (e.g. username/my-model)")
             return
 
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        self.log(f"⬆️ Pushing {model}...")
+        self.progress_signal.emit(True)
+        self.log_signal.emit(f"⬆️ Pushing {model}...")
 
         def push():
             try:
                 proc = subprocess.Popen(["ollama", "push", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 for line in proc.stdout:
-                    self.log(line.strip())
+                    self.log_signal.emit(line.strip())
                 proc.wait()
                 if proc.returncode == 0:
-                    self.log(f"✅ {model} pushed successfully!")
+                    self.log_signal.emit(f"✅ {model} pushed successfully!")
                 else:
-                    self.log("❌ Push failed")
+                    self.log_signal.emit("❌ Push failed")
             except Exception as e:
-                self.log(f"❌ Error: {e}")
+                self.log_signal.emit(f"❌ Error: {e}")
             finally:
-                self.progress.setVisible(False)
+                self.progress_signal.emit(False)
 
         threading.Thread(target=push, daemon=True).start()
 
@@ -457,7 +470,7 @@ SYSTEM You are a helpful assistant.""")
                     content = f.read()
                 self.modelfile_edit.setPlainText(content)
                 self.modelfile_path_label.setText(os.path.basename(path))
-                self.log(f"📂 Loaded: {os.path.basename(path)}")
+                self.log_signal.emit(f"📂 Loaded: {os.path.basename(path)}")
                 self.check_create_button()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Read error:\n{str(e)}")
@@ -479,21 +492,17 @@ SYSTEM You are a helpful assistant.""")
             QMessageBox.warning(self, "Error", "Start server first!")
             return
 
-        temp_file = "Modelfile_temp"
-        try:
-            with open(temp_file, "w", encoding="utf-8") as f:
-                f.write(content)
-            self.log(f"🛠️ Creating {name}...")
-            result = subprocess.run(["ollama", "create", name, "-f", temp_file], capture_output=True, text=True)
-            os.remove(temp_file)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=True) as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            self.log_signal.emit(f"🛠️ Creating {name}...")
+            result = subprocess.run(["ollama", "create", name, "-f", temp_file.name], capture_output=True, text=True)
             if result.returncode == 0:
-                self.log(f"✅ '{name}' created!")
+                self.log_signal.emit(f"✅ '{name}' created!")
                 self.load_models()
             else:
-                self.log(f"❌ Failed:\n{result.stderr}")
+                self.log_signal.emit(f"❌ Failed:\n{result.stderr}")
                 QMessageBox.critical(self, "Error", result.stderr or "Unknown")
-        except Exception as e:
-            self.log(f"❌ {e}")
 
     def pull_model(self):
         model = self.pull_input.text().strip()
@@ -504,22 +513,21 @@ SYSTEM You are a helpful assistant.""")
             QMessageBox.warning(self, "Error", "Start server first!")
             return
 
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        self.log(f"⬇️ Pulling {model}...")
+        self.progress_signal.emit(True)
+        self.log_signal.emit(f"⬇️ Pulling {model}...")
 
         def pull():
             try:
                 proc = subprocess.Popen(["ollama", "pull", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 for line in proc.stdout:
-                    self.log(line.strip())
+                    self.log_signal.emit(line.strip())
                 proc.wait()
-                self.log(f"✅ {model} pulled successfully!")
+                self.log_signal.emit(f"✅ {model} pulled successfully!")
                 self.load_models()
             except Exception as e:
-                self.log(f"❌ Error: {e}")
+                self.log_signal.emit(f"❌ Error: {e}")
             finally:
-                self.progress.setVisible(False)
+                self.progress_signal.emit(False)
 
         threading.Thread(target=pull, daemon=True).start()
 
@@ -529,13 +537,13 @@ SYSTEM You are a helpful assistant.""")
         if reply == QMessageBox.Yes:
             try:
                 subprocess.run(["ollama", "rm", model], check=True)
-                self.log(f"🗑️ Removed {model}")
+                self.log_signal.emit(f"🗑️ Removed {model}")
                 self.load_models()
                 self.selected_label.setText("No model selected")
                 self.rm_btn.setEnabled(False)
                 self.push_btn.setEnabled(False)
             except Exception as e:
-                self.log(f"❌ {e}")
+                self.log_signal.emit(f"❌ {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

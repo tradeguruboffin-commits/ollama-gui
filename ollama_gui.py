@@ -299,7 +299,7 @@ class OllamaGUI(QMainWindow):
         self.theme_btn.clicked.connect(self.toggle_theme)
 
         # ========== নতুন যোগ করা: Ollama Model Manager বাটন ==========
-        self.manager_btn = QPushButton("🦙 Manage Models")
+        self.manager_btn = QPushButton("⚙️ Manager")
         self.manager_btn.clicked.connect(self.open_model_manager)
         self.manager_btn.setStyleSheet("""
             background: #1a5f1a; color: white; font-weight: bold;
