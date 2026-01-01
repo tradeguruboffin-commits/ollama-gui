@@ -5,7 +5,8 @@ import threading
 import time
 import os
 import requests
-from PyQt5.QtCore import Qt
+import re
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QListWidget, QLineEdit,
@@ -16,12 +17,15 @@ class OllamaManager(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🦙 Ollama Model Manager")
-        self.resize(1700, 700)  # তোমার চাওয়া সাইজ
+        self.resize(1700, 700)
         self.process = None
         self.server_ready = False
         self.current_modelfile_path = None
+        self.current_selected_model = None
+        self.is_signed_in = False
         self.init_ui()
-        self.check_server_status()
+
+        QTimer.singleShot(100, self.check_server_status)
 
     def init_ui(self):
         central = QWidget()
@@ -30,7 +34,6 @@ class OllamaManager(QMainWindow):
         layout.setSpacing(30)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # Left Panel
         left = QVBoxLayout()
         left.setSpacing(30)
 
@@ -52,7 +55,27 @@ class OllamaManager(QMainWindow):
         self.refresh_btn.setMinimumHeight(70)
         left.addWidget(self.refresh_btn)
 
-        # Pull Model
+        auth_layout = QHBoxLayout()
+        auth_layout.setSpacing(15)
+        self.auth_status_label = QLabel("🔴 Not signed in to ollama.com")
+        self.auth_status_label.setStyleSheet("font-size: 28px; color: #ff5555; padding: 10px;")
+        auth_layout.addWidget(self.auth_status_label)
+
+        self.signin_btn = QPushButton("🔑 Sign In")
+        self.signin_btn.clicked.connect(self.signin)
+        self.signin_btn.setStyleSheet("padding: 18px; font-size: 28px;")
+        self.signin_btn.setMinimumHeight(70)
+        auth_layout.addWidget(self.signin_btn, 1)
+
+        self.signout_btn = QPushButton("🚪 Sign Out")
+        self.signout_btn.clicked.connect(self.signout)
+        self.signout_btn.setEnabled(False)
+        self.signout_btn.setStyleSheet("padding: 18px; font-size: 28px;")
+        self.signout_btn.setMinimumHeight(70)
+        auth_layout.addWidget(self.signout_btn, 1)
+
+        left.addLayout(auth_layout)
+
         pull_layout = QHBoxLayout()
         pull_layout.setSpacing(15)
         self.pull_input = QLineEdit()
@@ -67,11 +90,10 @@ class OllamaManager(QMainWindow):
         pull_layout.addWidget(self.pull_btn, 1)
         left.addLayout(pull_layout)
 
-        # Create Custom Model
         create_name_layout = QHBoxLayout()
         create_name_layout.setSpacing(15)
         self.create_name = QLineEdit()
-        self.create_name.setPlaceholderText("Custom model name (e.g. my-llama3)")
+        self.create_name.setPlaceholderText("Custom model name (e.g. username/my-llama3)")
         self.create_name.setStyleSheet("font-size: 28px; padding: 15px;")
         self.create_name.setMinimumHeight(70)
         create_name_layout.addWidget(self.create_name, 3)
@@ -84,7 +106,6 @@ class OllamaManager(QMainWindow):
         create_name_layout.addWidget(self.create_btn, 1)
         left.addLayout(create_name_layout)
 
-        # Modelfile Browse
         modelfile_btn_layout = QHBoxLayout()
         modelfile_btn_layout.setSpacing(15)
         self.modelfile_path_label = QLabel("No Modelfile selected")
@@ -98,7 +119,6 @@ class OllamaManager(QMainWindow):
         modelfile_btn_layout.addWidget(self.browse_modelfile_btn)
         left.addLayout(modelfile_btn_layout)
 
-        # Modelfile Editor
         left.addWidget(QLabel("📄 Modelfile Content:"), alignment=Qt.AlignCenter)
         self.modelfile_edit = QTextEdit()
         self.modelfile_edit.setPlaceholderText("""# Example Modelfile
@@ -109,7 +129,6 @@ SYSTEM You are a helpful assistant.""")
         self.modelfile_edit.setStyleSheet("font-size: 26px;")
         left.addWidget(self.modelfile_edit, 1)
 
-        # Right Panel
         right = QVBoxLayout()
         right.setSpacing(25)
 
@@ -134,15 +153,23 @@ SYSTEM You are a helpful assistant.""")
         self.selected_label = QLabel("No model selected")
         self.selected_label.setStyleSheet("font-size: 28px;")
         del_layout.addWidget(self.selected_label)
+
         self.rm_btn = QPushButton("🗑️ Remove")
         self.rm_btn.clicked.connect(self.remove_model)
         self.rm_btn.setEnabled(False)
         self.rm_btn.setStyleSheet("padding: 20px; font-size: 30px;")
         self.rm_btn.setMinimumHeight(70)
         del_layout.addWidget(self.rm_btn)
+
+        self.push_btn = QPushButton("⬆️ Push to ollama.com")
+        self.push_btn.clicked.connect(self.push_model)
+        self.push_btn.setEnabled(False)
+        self.push_btn.setStyleSheet("padding: 20px; font-size: 30px;")
+        self.push_btn.setMinimumHeight(70)
+        del_layout.addWidget(self.push_btn)
+
         right.addLayout(del_layout)
 
-        # Assemble panels
         left_widget = QWidget()
         left_widget.setLayout(left)
         left_widget.setMinimumWidth(520)
@@ -195,8 +222,9 @@ SYSTEM You are a helpful assistant.""")
         """)
 
     def log(self, text):
-        self.log_area.append(text)
-        self.log_area.ensureCursorVisible()
+        if hasattr(self, 'log_area') and self.log_area:
+            self.log_area.append(text)
+            self.log_area.ensureCursorVisible()
 
     def is_server_running(self):
         try:
@@ -218,6 +246,9 @@ SYSTEM You are a helpful assistant.""")
             self.serve_btn.setText("▶️ Start Ollama Serve")
             self.refresh_btn.setEnabled(False)
             self.model_list.clear()
+        self.update_push_button()
+
+        QTimer.singleShot(500, self.check_initial_auth_status)
 
     def toggle_serve(self):
         if self.server_ready:
@@ -264,7 +295,7 @@ SYSTEM You are a helpful assistant.""")
 
             self.log(f"✅ Loaded {len(models)} models.")
         except Exception as e:
-            self.log(f"❌ Failed: {str(e)}")
+            self.log(f"❌ Failed to load models: {str(e)}")
 
     def format_size(self, size_bytes):
         if size_bytes == 0 or size_bytes is None:
@@ -287,22 +318,149 @@ SYSTEM You are a helpful assistant.""")
         self.selected_label.setText(f"Selected: {model_name}")
         self.rm_btn.setEnabled(True)
         self.current_selected_model = model_name
+        self.update_push_button()
+
+    def update_push_button(self):
+        if not hasattr(self, 'push_btn') or not self.push_btn:
+            return
+        has_model = bool(hasattr(self, 'current_selected_model') and self.current_selected_model)
+        has_username = has_model and '/' in self.current_selected_model
+        enabled = has_username and self.is_signed_in
+        self.push_btn.setEnabled(enabled)
+
+    def check_initial_auth_status(self):
+        self.log("🔍 Checking initial authentication status...")
+        result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
+        full_output = result.stdout + result.stderr
+        # আরও নিরাপদ regex
+        match = re.search(r"already signed in as user ['\"]?([a-zA-Z0-9_]+)['\"]?", full_output, re.IGNORECASE)
+        if match:
+            username = match.group(1)
+            self.log(f"✅ Already signed in as: {username}")
+            self.auth_status_label.setText(f"🟢 Signed in as {username}")
+            self.auth_status_label.setStyleSheet("font-size: 28px; color: #50fa7b; padding: 10px;")
+            self.signin_btn.setEnabled(False)
+            self.signout_btn.setEnabled(True)
+            self.is_signed_in = True
+        else:
+            self.log("🔴 Not signed in.")
+            self.is_signed_in = False
+        self.update_push_button()
+
+    def signin(self):
+        self.log("🔑 Checking sign-in status...")
+        result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
+        full_output = result.stdout + result.stderr
+
+        match = re.search(r"already signed in as user ['\"]?([a-zA-Z0-9_]+)['\"]?", full_output, re.IGNORECASE)
+        if match:
+            username = match.group(1)
+            self.log(f"✅ Already signed in as: {username}")
+            self.auth_status_label.setText(f"🟢 Signed in as {username}")
+            self.auth_status_label.setStyleSheet("font-size: 28px; color: #50fa7b; padding: 10px;")
+            self.signin_btn.setEnabled(False)
+            self.signout_btn.setEnabled(True)
+            self.is_signed_in = True
+            self.update_push_button()
+            return
+
+        url_match = re.search(r"https?://[^\s]+", full_output)
+        if url_match:
+            url = url_match.group(0).strip()
+            self.log("   📎 Authentication required:")
+            self.log(f"   {url}")
+            self.log("   Opening browser...")
+            try:
+                subprocess.run(["xdg-open", url], check=False)
+                self.log("   🌐 Browser opened.")
+            except:
+                self.log("   ⚠️ Auto-open failed. Copy URL manually.")
+
+            self.auth_status_label.setText("🟡 Pending: Complete in browser")
+            self.auth_status_label.setStyleSheet("font-size: 28px; color: #fbbc05; padding: 10px;")
+            self.signin_btn.setEnabled(False)
+            self.signout_btn.setEnabled(True)
+            self.is_signed_in = False
+
+            if hasattr(self, 'auth_poll_timer'):
+                self.auth_poll_timer.stop()
+            self.auth_poll_timer = QTimer()
+            self.auth_poll_timer.timeout.connect(self.check_auth_status)
+            self.auth_poll_timer.start(3000)
+        else:
+            self.log("❌ Unexpected response from signin.")
+            self.log(f"   Output: {result.stdout.strip()}")
+            self.log(f"   Error: {result.stderr.strip()}")
+
+    def check_auth_status(self):
+        result = subprocess.run(["ollama", "signin"], capture_output=True, text=True)
+        full = result.stdout + result.stderr
+        match = re.search(r"already signed in as user ['\"]?([a-zA-Z0-9_]+)['\"]?", full, re.IGNORECASE)
+        if match:
+            username = match.group(1)
+            self.log("✅ Authentication completed!")
+            self.auth_status_label.setText(f"🟢 Signed in as {username}")
+            self.auth_status_label.setStyleSheet("font-size: 28px; color: #50fa7b; padding: 10px;")
+            self.is_signed_in = True
+            self.update_push_button()
+            self.auth_poll_timer.stop()
+
+    def signout(self):
+        reply = QMessageBox.question(self, "Confirm", "Sign out from ollama.com?")
+        if reply == QMessageBox.Yes:
+            result = subprocess.run(["ollama", "signout"], capture_output=True, text=True)
+            if result.returncode == 0:
+                self.log("🚪 Signed out successfully.")
+                self.auth_status_label.setText("🔴 Not signed in to ollama.com")
+                self.auth_status_label.setStyleSheet("font-size: 28px; color: #ff5555; padding: 10px;")
+                self.signin_btn.setEnabled(True)
+                self.signout_btn.setEnabled(False)
+                self.is_signed_in = False
+                self.update_push_button()
+                if hasattr(self, 'auth_poll_timer'):
+                    self.auth_poll_timer.stop()
+            else:
+                self.log(f"❌ Sign out failed: {result.stderr}")
+
+    def push_model(self):
+        model = self.current_selected_model
+        if '/' not in model:
+            QMessageBox.warning(self, "Warning", "Model name must include username (e.g. username/my-model)")
+            return
+
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.log(f"⬆️ Pushing {model}...")
+
+        def push():
+            try:
+                proc = subprocess.Popen(["ollama", "push", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in proc.stdout:
+                    self.log(line.strip())
+                proc.wait()
+                if proc.returncode == 0:
+                    self.log(f"✅ {model} pushed successfully!")
+                else:
+                    self.log("❌ Push failed")
+            except Exception as e:
+                self.log(f"❌ Error: {e}")
+            finally:
+                self.progress.setVisible(False)
+
+        threading.Thread(target=push, daemon=True).start()
 
     def browse_modelfile(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Modelfile", "", "Modelfile (*);;Text Files (*.txt);;All Files (*)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "Select Modelfile", "", "Modelfile (*);;All Files (*)")
         if path:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
                 self.modelfile_edit.setPlainText(content)
-                self.current_modelfile_path = path
                 self.modelfile_path_label.setText(os.path.basename(path))
-                self.log(f"📂 Loaded Modelfile: {os.path.basename(path)}")
+                self.log(f"📂 Loaded: {os.path.basename(path)}")
                 self.check_create_button()
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Could not read file:\n{str(e)}")
+                QMessageBox.critical(self, "Error", f"Read error:\n{str(e)}")
 
     def on_modelfile_changed(self):
         self.check_create_button()
@@ -318,22 +476,22 @@ SYSTEM You are a helpful assistant.""")
         if not name or not content:
             return
         if not self.server_ready:
-            QMessageBox.warning(self, "Error", "Start Ollama server first!")
+            QMessageBox.warning(self, "Error", "Start server first!")
             return
 
         temp_file = "Modelfile_temp"
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
                 f.write(content)
-            self.log(f"🛠️ Creating model: {name}...")
+            self.log(f"🛠️ Creating {name}...")
             result = subprocess.run(["ollama", "create", name, "-f", temp_file], capture_output=True, text=True)
             os.remove(temp_file)
             if result.returncode == 0:
-                self.log(f"✅ Custom model '{name}' created successfully!")
+                self.log(f"✅ '{name}' created!")
                 self.load_models()
             else:
-                self.log(f"❌ Create failed:\n{result.stderr}")
-                QMessageBox.critical(self, "Error", result.stderr)
+                self.log(f"❌ Failed:\n{result.stderr}")
+                QMessageBox.critical(self, "Error", result.stderr or "Unknown")
         except Exception as e:
             self.log(f"❌ {e}")
 
@@ -366,8 +524,6 @@ SYSTEM You are a helpful assistant.""")
         threading.Thread(target=pull, daemon=True).start()
 
     def remove_model(self):
-        if not hasattr(self, 'current_selected_model'):
-            return
         model = self.current_selected_model
         reply = QMessageBox.question(self, "Confirm", f"Permanently delete '{model}'?")
         if reply == QMessageBox.Yes:
@@ -377,6 +533,7 @@ SYSTEM You are a helpful assistant.""")
                 self.load_models()
                 self.selected_label.setText("No model selected")
                 self.rm_btn.setEnabled(False)
+                self.push_btn.setEnabled(False)
             except Exception as e:
                 self.log(f"❌ {e}")
 
