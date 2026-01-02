@@ -8,13 +8,15 @@ import subprocess
 import glob
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QComboBox, QLabel, QFileDialog,
     QListWidget, QListWidgetItem, QMenu, QInputDialog,
-    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QScrollArea, QMessageBox
+    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QScrollArea, QMessageBox,
+    QProgressBar
 )
 
 from database.postgres import PostgresDB
@@ -339,6 +341,14 @@ class OllamaGUI(QMainWindow):
         self.clear_rag_btn.setEnabled(False)
         left.addWidget(self.clear_rag_btn)
 
+        # Progress Bar for RAG
+        self.rag_progress = QProgressBar()
+        self.rag_progress.setRange(0, 100)
+        self.rag_progress.setValue(0)
+        self.rag_progress.setTextVisible(True)
+        self.rag_progress.setVisible(False)
+        left.addWidget(self.rag_progress)
+
         left.addWidget(QLabel("<b>⚙️ Crews</b>"))
 
         self.new_crew_btn = QPushButton("➕ Add New Crew")
@@ -440,6 +450,8 @@ class OllamaGUI(QMainWindow):
                 QListWidget::item[text^="⭐ "] { color: #ffaa00; font-weight: bold; }
                 QPushButton { background:#333; color:white; border:none; padding:12px; border-radius:8px; font-size: 18px; }
                 QPushButton:hover { background:#555; }
+                QProgressBar { background:#222; color:white; border-radius:8px; text-align:center; }
+                QProgressBar::chunk { background:#2d8; }
                 QComboBox { background:#222; color:white; padding:10px; font-size: 18px; }
                 QLineEdit { background:#222; color:white; padding:12px; border-radius:8px; font-size: 18px; }
             """)
@@ -455,11 +467,13 @@ class OllamaGUI(QMainWindow):
                 QListWidget::item[text^="⭐ "] { color: #fd7e14; font-weight: bold; }
                 QPushButton { background:#0d6efd; color:white; border:none; padding:12px; border-radius:8px; font-size: 18px; }
                 QPushButton:hover { background:#0b5ed7; }
+                QProgressBar { background:#e9ecef; color:#212529; border-radius:8px; text-align:center; }
+                QProgressBar::chunk { background:#0d6efd; }
                 QComboBox { background:#ffffff; color:#212529; padding:10px; font-size: 18px; border: 1px solid #ced4da; border-radius: 8px; }
                 QLineEdit { background:#ffffff; color:#212529; padding:12px; border-radius:8px; font-size: 18px; border: 1px solid #ced4da; }
             """)
 
-    # ================= RAG FUNCTIONS =================
+    # ================= OPTIMIZED RAG WITH PROGRESS BAR =================
     def add_rag_knowledge(self):
         files, _ = QFileDialog.getOpenFileNames(
             self, "Select Documents for RAG", "", "Documents (*.pdf *.txt *.md *.docx *.html)"
@@ -495,10 +509,30 @@ class OllamaGUI(QMainWindow):
             self.chat.append("\n❌ No documents loaded.\n")
             return
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        # Smaller chunks for faster embedding
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         chunks = splitter.split_documents(docs)
 
-        embed = OllamaEmbeddings(model="nomic-embed-text:latest")
+        if not chunks:
+            self.chat.append("\n❌ No chunks created.\n")
+            return
+
+        embed = OllamaEmbeddings(model="nomic-embed-text:latest")  # Change to mxbai-embed-large if pulled
+
+        self.rag_progress.setMaximum(len(chunks))
+        self.rag_progress.setValue(0)
+        self.rag_progress.setVisible(True)
+        self.chat.append("\n🔄 Processing chunks for embedding...\n")
+
+        def batch_embed(batch):
+            texts = [c.page_content for c in batch]
+            return embed.embed_documents(texts)
+
+        batch_size = 50
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            batches = [chunks[i:i+batch_size] for i in range(0, len(chunks), batch_size)]
+            for i, _ in enumerate(executor.map(batch_embed, batches)):
+                self.rag_progress.setValue((i+1) * batch_size)
 
         if os.path.exists("./rag_db"):
             vectordb = Chroma(persist_directory="./rag_db", embedding_function=embed)
@@ -512,6 +546,7 @@ class OllamaGUI(QMainWindow):
         self.retriever = vectordb.as_retriever(search_kwargs={"k": 5})
         self.rag_documents_count += len(chunks)
         self.clear_rag_btn.setEnabled(True)
+        self.rag_progress.setVisible(False)
 
     def clear_rag_knowledge(self):
         if os.path.exists("./rag_db"):
@@ -521,7 +556,9 @@ class OllamaGUI(QMainWindow):
         self.clear_rag_btn.setEnabled(False)
         self.chat.append("\n🗑️ RAG knowledge cleared!\n")
 
-    # ================= OTHER FUNCTIONS =================
+    # ================= REST OF FUNCTIONS (ALL INCLUDED) =================
+    # (open_model_manager, filter_conversations, stop_or_reload, update_stop_reload_button, update_current_crew_button, load_models, new_chat, load_conversation, export_chat, show_conv_menu, show_crew_menu, create_new_crew, edit_crew, delete_crew, set_default_crew, open_current_crew, toggle_advanced_mode, attach_image, toggle_theme, refresh_crews_list, select_crew_from_list, send, append_token, on_generation_finished, show_error)
+
     def open_model_manager(self):
         manager_file = "ollama_manager.py"
         if not os.path.exists(manager_file):
@@ -820,7 +857,7 @@ class OllamaGUI(QMainWindow):
                     m["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{self.attached_image_base64}"}})
             ollama_messages.append(m)
 
-        # RAG as system message
+        # RAG as system message just before user message
         if self.retriever:
             context_docs = self.retriever.invoke(prompt)
             if context_docs:
