@@ -1,116 +1,60 @@
-# Ollama-GUI
+Ollama GUI UnofficialGitHub License
+PyPI - Version
+PyPI - Python VersionA feature-rich, unofficial Ollama GUI built with PyQt5, designed for advanced local AI interactions. This project extends the original Ollama capabilities with multi-crew agents, RAG support, and more. No additional dependencies beyond standard Python libraries and required packages.This is an Unofficial ForkThis is an enhanced, unofficial version of Ollama GUI, focusing on advanced features like crew workflows, RAG knowledge integration, and database-backed chat history. Ideal for developers and power users.
+Install via Pi-Apps (if on Raspberry Pi) or follow the instructions below.
+![badge](https://github.com/Botspot/pi-apps/blob/master/icons/badge.png?raw=true)ollama-gui-screenshot  <!-- আপনার স্ক্রিনশট লিঙ্ক অ্যাড করুন --> FeaturesCore Features Multi-file project with modular structure.
+ Dependencies: PyQt5, requests, langchain (for RAG), PostgreSQL (for chat history).
+ Auto-detect Ollama models and server status.
+ Custom Ollama host support.
+ Multiple conversations with search, pin, rename, and delete.
+ Sidebar for chats and crews; right-click menus for management.
+ Stop or reload generation at any time.
 
-![GitHub License](https://img.shields.io/github/license/chyok/ollama-gui)
-![PyPI - Version](https://img.shields.io/pypi/v/ollama-gui)
-![PyPI - Python Version](https://img.shields.io/pypi/pyversions/ollama-gui)
+Advanced Features (v1.0+) Model Management: Integrate with separate Ollama Manager for pull/push/remove.
+ UI Enhancements: Dark/light theme toggle, modern styling.
+ Editable Conversation History with PostgreSQL backend.
+ Crew Mode: Multi-agent workflows (e.g., Planner, Coder) for complex tasks.
+ RAG Support: Add knowledge from PDFs, TXT, MD, DOCX, HTML; clear database.
+ Image Attachments: Attach and send images in chats.
+ Export Chats: Save as MD or TXT.
+ Stats: Display generation stats (chunks streamed, speed).
 
-A very simple ollama GUI, implemented using the built-in Python Tkinter library, with no additional dependencies.
-Provide you with the simplest possible visual Ollama interface.
+ Before StartSet up Ollama service first. Refer to:  Ollama  
+Ollama GitHub
 
-## This is Botspot's fork for use in the Pi-Apps store.
-Improves the appearance theme on Linux, fixes the taskbar icon, and fixes the blank settings button issue.  
-Go install it from Pi-Apps:  
-[![badge](https://github.com/Botspot/pi-apps/blob/master/icons/badge.png?raw=true)](https://github.com/Botspot/pi-apps)
+Also, ensure PostgreSQL is installed and configured for chat history. Install required Python packages:  
 
-![ollama-gui-1 2 0](https://github.com/user-attachments/assets/a4bb979b-68a4-4062-b484-7542f2a866e0)
+pip install PyQt5 requests langchain langchain-community langchain-chroma psycopg2-binary
 
-## 🚀 Features
-### v1.1.0
-+ 📁 One file project.
-+ 📦 No external dependencies, only **tkinter** which is usually bundled.
-+ 🔍 Auto check ollama model list.
-+ 🌐 Customizable ollama host support.
-+ 💬 Multiple conversations.
-+ 📋 Menu bar and right-click menu.
-+ 🛑 Stop generating at any time.
-### v1.2.0
-+ 🗂️ Model Management: Download and Delete Models.
-+ 🎨 UI Enhancement: Bubble dialog theme.
-+ 📝 Editable Conversation History.
+ RunChoose any method:Source Code
 
-## 📎 Before Start
-
-We need to set up Ollama service first.
-
-Please refer to:   
-+ [Ollama](https://ollama.com/)  
-+ [Ollama Github](https://github.com/ollama/ollama)
-
-## ⚙️ Run
-
-Choose any way you like:
-> **Note: If you are using a Mac and the system version is Sonoma, please refer to the Q&A at the bottom.**
-
-### source code
-
-```
 python ollama_gui.py
-```
 
-### using pip
+Using Pip (if published)
 
-```
-pip install ollama-gui
-ollama-gui
-```
+pip install ollama-gui-unofficial
+ollama-gui-unofficial
 
-### binary file
+Binary File (Coming Soon)Platform
+Download Link
+Windows
+Download
+Mac (Apple Silicon)
+Download
+Linux
+Download
 
-| Platform | Download Link                                            | 
-|----------|----------------------------------------------------------|
-| Windows  | [Download](https://github.com/chyok/ollama-gui/releases) |
-| Mac (Apple Silicon)  | [Download](https://github.com/chyok/ollama-gui/releases) |
-| Linux  | [Download](https://github.com/chyok/ollama-gui/releases) |
+ Q&AWhy is the app slow when adding RAG documents?This can happen with large folders. Optimize by processing in batches, using smaller chunk sizes, or enabling GPU support in Ollama. See the optimization guide in the docs.ImportError: No module named 'PyQt5' or other dependencies?Install the required packages:  
 
-## 📋 Q&A
-### I'm using a Mac, why does the application sometimes not respond when I click on it?
+pip install PyQt5 requests psycopg2-binary langchain langchain-community langchain-chroma langchain-ollama
 
-The issue affects macOS Sonoma users running applications that use Tcl/Tk versions 8.6.12 or older, including various Python versions.  
-When the mouse cursor is inside the Tkinter window during startup, GUI elements become unresponsive to clicks.
+For Ubuntu/Debian:  
 
-Solution:  
-Update to Tcl/Tk version 8.6.13 or newer, which fixes this problem.   
-  
-For Python users, this can be done by:  
-Using Python 3.11.7 or later, which bundles the fixed Tcl/Tk version.  
-Using Python 3.12 or later, which already includes the fix.  
-https://www.python.org/downloads/macos/
+sudo apt-get install python3-pyqt5 libpq-dev
 
-For other Python versions, installing Tcl/Tk 8.6.13+ separately (e.g., via Homebrew) and ensuring Python uses this version.
+For macOS:  
 
-Here is the issue: https://github.com/python/cpython/issues/110218
+brew install pyqt postgresql
 
-------
-
-### ImportError: No module named 'Tkinter'
-
-This probably happens because the Tk library is not installed.
-
-For Ubuntu or other distros with Apt:
-
-```
-sudo apt-get install python3-tk
-```
-
-For Fedora:
-
-```
-sudo dnf install python3-tkinter
-```
-
-For macOS:
-
-```
-brew install python-tk
-```
-
-For Windows:
-
-make sure to **check in the Python install the optional feature "tcl/tk and IDLE"**.  
-
-Refer to: https://stackoverflow.com/questions/25905540/importerror-no-module-named-tkinter
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
+For Windows: Ensure PostgreSQL is installed and paths are set.Database connection issues?Configure PostgreSQL credentials in database/postgres.py. Create the database schema as per the code.Ollama server not responding?Ensure Ollama is running on localhost:11434. Start it with ollama serve.Refer to: https://stackoverflow.com/questions/related-to-dependencies for more troubleshooting.LicenseThis project is licensed under the MIT License (LICENSE).
 

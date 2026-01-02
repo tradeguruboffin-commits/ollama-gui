@@ -1,0 +1,22 @@
+# Core GUI and HTTP dependencies (latest)
+PyQt5
+requests
+
+# LangChain for RAG pipeline (latest compatible versions)
+langchain
+langchain-community  
+langchain-chroma
+langchain-ollama
+
+# Chroma vector database (latest)
+chromadb
+
+# PostgreSQL connector (latest)
+psycopg2-binary
+
+# Custom PostgresDB module
+PostgresDB @ git+https://github.com/yourusername/PostgresDB.git@main
+
+# Development utilities (latest)
+python-dotenv
+pydantic
