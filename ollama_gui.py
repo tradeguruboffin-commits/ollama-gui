@@ -3,8 +3,11 @@ import sys
 import json
 import requests
 import base64
-import os   # নতুন যোগ করা — subprocess এর জন্য
-import subprocess  # নতুন যোগ করা
+import os
+import subprocess
+import glob
+import shutil
+import time
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
@@ -16,24 +19,34 @@ from PyQt5.QtWidgets import (
 
 from database.postgres import PostgresDB
 
+# RAG Imports
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, UnstructuredMarkdownLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_community.embeddings import OllamaEmbeddings
 
 # ================= THREADS =================
 class DirectOllamaThread(QThread):
     token = pyqtSignal(str)
     error = pyqtSignal(str)
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(str, float, int)  # response, elapsed, chunks
 
     def __init__(self, model, messages):
         super().__init__()
         self.model = model
         self.messages = messages
         self.running = True
+        self.start_time = None
+        self.chunk_count = 0
         self.last_response = ""
 
     def stop(self):
         self.running = False
 
     def run(self):
+        self.start_time = time.time()
+        self.chunk_count = 0
+        response = ""
         try:
             url = "http://localhost:11434/api/chat"
             payload = {
@@ -43,7 +56,6 @@ class DirectOllamaThread(QThread):
                 "options": {"temperature": 0.7}
             }
 
-            response = ""
             with requests.post(url, json=payload, stream=True, timeout=300) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
@@ -54,11 +66,13 @@ class DirectOllamaThread(QThread):
                         if "message" in data and "content" in data["message"]:
                             token = data["message"]["content"]
                             response += token
+                            self.chunk_count += 1
                             self.token.emit(token)
                         if data.get("done"):
                             break
+            elapsed = time.time() - self.start_time
             self.last_response = response.strip()
-            self.finished.emit(self.last_response)
+            self.finished.emit(self.last_response, elapsed, self.chunk_count)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -66,7 +80,7 @@ class DirectOllamaThread(QThread):
 class CustomCrewThread(QThread):
     token = pyqtSignal(str)
     error = pyqtSignal(str)
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(str, float, int)
 
     def __init__(self, user_prompt, crew_config, history_messages):
         super().__init__()
@@ -74,56 +88,73 @@ class CustomCrewThread(QThread):
         self.crew_config = crew_config
         self.history_messages = history_messages
         self.running = True
+        self.start_time = None
+        self.total_chunks = 0
 
     def stop(self):
         self.running = False
 
-    def run(self):
+    def run_agent_inline(self, model, messages):
+        response = ""
         try:
-            output = "# OLLAMA CUSTOM CREW REPORT\n\n"
-            output += f"**User Request:** {self.user_prompt}\n\n---\n\n"
-            context = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in self.history_messages])
-            previous = f"{context}\nUSER: {self.user_prompt}"
+            url = "http://localhost:11434/api/chat"
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "options": {"temperature": 0.7}
+            }
 
-            for i, agent in enumerate(self.crew_config, 1):
-                if not self.running:
-                    break
-
-                role = agent['role']
-                model = agent['model']
-                system_prompt = agent.get('system_prompt', '').strip()
-                input_prompt = agent['input_prompt'].format(previous=previous)
-
-                self.token.emit(f"\n[👤 {i}. {role} ({model}) Working...]\n")
-
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                messages.append({"role": "user", "content": input_prompt})
-
-                agent_thread = DirectOllamaThread(model, messages)
-                agent_thread.token.connect(self.token)
-                agent_thread.error.connect(self.error)
-
-                agent_thread.start()
-                agent_thread.wait()
-
-                if not self.running:
-                    break
-
-                out = agent_thread.last_response.strip()
-                if not out:
-                    out = "[No response from model]"
-                output += f"### {role} Output\n{out}\n\n---\n\n"
-                previous = out
-
-            if self.running:
-                self.finished.emit(output)
-            else:
-                self.finished.emit("")
-
+            with requests.post(url, json=payload, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not self.running:
+                        break
+                    if line:
+                        data = json.loads(line.decode())
+                        if "message" in data and "content" in data["message"]:
+                            token = data["message"]["content"]
+                            response += token
+                            self.total_chunks += 1
+                            self.token.emit(token)
         except Exception as e:
-            self.error.emit(str(e))
+            self.token.emit(f"\n[ERROR in {model}: {str(e)}]\n")
+        return response.strip()
+
+    def run(self):
+        self.start_time = time.time()
+        output = "# OLLAMA CUSTOM CREW REPORT\n\n"
+        output += f"**User Request:** {self.user_prompt}\n\n---\n\n"
+        previous = self.user_prompt
+
+        for i, agent in enumerate(self.crew_config, 1):
+            if not self.running:
+                break
+
+            role = agent['role']
+            model = agent['model']
+            system_prompt = agent.get('system_prompt', '').strip()
+            input_prompt = agent['input_prompt'].format(previous=previous)
+
+            self.token.emit(f"\n[👤 {i}. {role} ({model}) Working...]\n")
+
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": input_prompt})
+
+            out = self.run_agent_inline(model, messages)
+
+            if not out:
+                out = "[No response from model]"
+            output += f"### {role} Output\n{out}\n\n---\n\n"
+            previous = out
+
+        elapsed = time.time() - self.start_time
+        if self.running:
+            self.finished.emit(output, elapsed, self.total_chunks)
+        else:
+            self.finished.emit(output + "\n\n[GENERATION STOPPED BY USER]", elapsed, self.total_chunks)
 
 
 # ================= CREW CONFIG DIALOG =================
@@ -195,18 +226,27 @@ class CrewConfigDialog(QDialog):
 
     def get_crew_data(self):
         name = self.name_edit.text().strip()
-        if not name: return None, None
+        if not name:
+            QMessageBox.warning(self, "Error", "Crew name required")
+            return None, None
+
         config = []
         for a in self.agent_widgets:
             role = a['role'].text().strip()
             inp = a['input'].toPlainText().strip()
-            if role and inp:
-                config.append({
-                    'role': role,
-                    'model': a['model'].currentText(),
-                    'system_prompt': a['system'].toPlainText().strip(),
-                    'input_prompt': inp
-                })
+            if not role:
+                QMessageBox.warning(self, "Error", "All agents must have a role")
+                return None, None
+            if "{previous}" not in inp:
+                reply = QMessageBox.question(self, "Warning", f"Agent '{role}' input template has no {{previous}}. Continue?")
+                if reply == QMessageBox.No:
+                    return None, None
+            config.append({
+                'role': role,
+                'model': a['model'].currentText(),
+                'system_prompt': a['system'].toPlainText().strip(),
+                'input_prompt': inp
+            })
         return name, config
 
 
@@ -232,6 +272,10 @@ class OllamaGUI(QMainWindow):
         self.attached_image_path = None
         self.attached_image_base64 = None
 
+        # RAG
+        self.retriever = None
+        self.rag_documents_count = 0
+
         self.init_ui()
         self.load_models()
         self.refresh_conversations()
@@ -245,14 +289,13 @@ class OllamaGUI(QMainWindow):
 
         # LEFT SIDEBAR
         left = QVBoxLayout()
-        left.setSpacing(10)
+        left.setSpacing(15)
 
         left.addWidget(QLabel("<b>📂 Chats</b>"))
         self.new_chat_btn = QPushButton("➕ New Chat")
         self.new_chat_btn.clicked.connect(self.new_chat)
         left.addWidget(self.new_chat_btn)
 
-        # সার্চ বার
         self.chat_search = QLineEdit()
         self.chat_search.setPlaceholderText("🔍 Search chats...")
         self.chat_search.setClearButtonEnabled(True)
@@ -263,7 +306,38 @@ class OllamaGUI(QMainWindow):
         self.conv_list.itemClicked.connect(self.load_conversation)
         self.conv_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.conv_list.customContextMenuRequested.connect(self.show_conv_menu)
-        left.addWidget(self.conv_list)
+        left.addWidget(self.conv_list, 1)
+
+        # Manager Button - Round
+        self.manager_btn = QPushButton("🦙 Manager")
+        self.manager_btn.clicked.connect(self.open_model_manager)
+        self.manager_btn.setStyleSheet("""
+            QPushButton {
+                background: #1a5f1a; 
+                color: white; 
+                font-weight: bold;
+                padding: 15px; 
+                border-radius: 35px; 
+                font-size: 18px;
+                min-height: 70px;
+            }
+            QPushButton:hover { background: #2d8f2d; }
+        """)
+        left.addWidget(self.manager_btn, alignment=Qt.AlignCenter)
+
+        # RAG Buttons
+        self.rag_btn = QPushButton("📂 Add Knowledge (RAG)")
+        self.rag_btn.clicked.connect(self.add_rag_knowledge)
+        self.rag_btn.setStyleSheet("background: #2d5; color: white; font-weight: bold; padding: 12px; border-radius: 8px;")
+        self.rag_btn.setMinimumHeight(50)
+        left.addWidget(self.rag_btn)
+
+        self.clear_rag_btn = QPushButton("🗑️ Clear Knowledge")
+        self.clear_rag_btn.clicked.connect(self.clear_rag_knowledge)
+        self.clear_rag_btn.setStyleSheet("background: #a33; color: white; font-weight: bold; padding: 12px; border-radius: 8px;")
+        self.clear_rag_btn.setMinimumHeight(50)
+        self.clear_rag_btn.setEnabled(False)
+        left.addWidget(self.clear_rag_btn)
 
         left.addWidget(QLabel("<b>⚙️ Crews</b>"))
 
@@ -298,23 +372,12 @@ class OllamaGUI(QMainWindow):
         self.theme_btn = QPushButton("🌙 Theme")
         self.theme_btn.clicked.connect(self.toggle_theme)
 
-        # ========== নতুন যোগ করা: Ollama Model Manager বাটন ==========
-        self.manager_btn = QPushButton("⚙️ Manager")
-        self.manager_btn.clicked.connect(self.open_model_manager)
-        self.manager_btn.setStyleSheet("""
-            background: #1a5f1a; color: white; font-weight: bold;
-            padding: 12px; border-radius: 8px; font-size: 16px;
-        """)
-        self.manager_btn.setMinimumHeight(50)
-
         top.addWidget(QLabel("Single Model:"))
         top.addWidget(self.model_box)
         top.addStretch()
         top.addWidget(self.mode_btn)
         top.addWidget(self.current_crew_btn)
         top.addWidget(self.theme_btn)
-        top.addWidget(self.manager_btn)  # এখানে যোগ করা হলো
-        # ============================================================
 
         right.addLayout(top)
 
@@ -323,7 +386,6 @@ class OllamaGUI(QMainWindow):
         self.chat.setFont(QFont("DejaVu Sans", 26))
         right.addWidget(self.chat, 1)
 
-        # Input + Attach
         input_layout = QHBoxLayout()
         self.attach_btn = QPushButton("📎")
         self.attach_btn.setFixedWidth(50)
@@ -365,25 +427,114 @@ class OllamaGUI(QMainWindow):
         main.addLayout(right)
         self.apply_theme()
 
-    # ========== নতুন ফাংশন: Ollama Manager খোলা ==========
+    def apply_theme(self):
+        if self.dark:
+            self.setStyleSheet("""
+                QMainWindow, QWidget { background:#121212; color:#e0e0e0; }
+                QTextEdit { background:#1e1e1e; color:#fff; border: none; }
+                QListWidget { background:#181818; color:#ddd; border: none; padding: 10px; font-size: 20px; }
+                QListWidget::item { padding: 20px 18px; min-height: 60px; border-bottom: 1px solid #2a2a2a; border-radius: 12px; margin: 6px 10px; }
+                QListWidget::item:hover { background: #2a2a2a; border-radius: 14px; }
+                QListWidget::item:selected { background: #1f6feb; color: white; font-weight: bold; border-radius: 14px; }
+                QListWidget::item[text^="📌 "] { color: #ffd700; font-weight: bold; }
+                QListWidget::item[text^="⭐ "] { color: #ffaa00; font-weight: bold; }
+                QPushButton { background:#333; color:white; border:none; padding:12px; border-radius:8px; font-size: 18px; }
+                QPushButton:hover { background:#555; }
+                QComboBox { background:#222; color:white; padding:10px; font-size: 18px; }
+                QLineEdit { background:#222; color:white; padding:12px; border-radius:8px; font-size: 18px; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QMainWindow, QWidget { background:#f8f9fa; color:#212529; }
+                QTextEdit { background:#ffffff; color:#212529; border: 1px solid #ced4da; }
+                QListWidget { background:#ffffff; color:#212529; border: 1px solid #dee2e6; padding: 10px; font-size: 20px; }
+                QListWidget::item { padding: 20px 18px; min-height: 60px; border-bottom: 1px solid #e9ecef; border-radius: 12px; margin: 6px 10px; }
+                QListWidget::item:hover { background: #e3f2fd; border-radius: 14px; }
+                QListWidget::item:selected { background: #0d6efd; color: white; font-weight: bold; border-radius: 14px; }
+                QListWidget::item[text^="📌 "] { color: #ffc107; font-weight: bold; }
+                QListWidget::item[text^="⭐ "] { color: #fd7e14; font-weight: bold; }
+                QPushButton { background:#0d6efd; color:white; border:none; padding:12px; border-radius:8px; font-size: 18px; }
+                QPushButton:hover { background:#0b5ed7; }
+                QComboBox { background:#ffffff; color:#212529; padding:10px; font-size: 18px; border: 1px solid #ced4da; border-radius: 8px; }
+                QLineEdit { background:#ffffff; color:#212529; padding:12px; border-radius:8px; font-size: 18px; border: 1px solid #ced4da; }
+            """)
+
+    # ================= RAG FUNCTIONS =================
+    def add_rag_knowledge(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Documents for RAG", "", "Documents (*.pdf *.txt *.md *.docx *.html)"
+        )
+        folder = QFileDialog.getExistingDirectory(self, "Or Select Folder for All Files")
+        
+        paths = files
+        if folder:
+            paths += glob.glob(os.path.join(folder, "**/*.*"), recursive=True)
+        
+        if not paths:
+            return
+
+        docs = []
+        for p in paths:
+            try:
+                if p.lower().endswith(".pdf"):
+                    loader = PyPDFLoader(p)
+                elif p.lower().endswith(".docx"):
+                    loader = Docx2txtLoader(p)
+                elif p.lower().endswith(".md"):
+                    loader = UnstructuredMarkdownLoader(p)
+                elif p.lower().endswith((".html", ".htm")):
+                    from langchain_community.document_loaders import UnstructuredHTMLLoader
+                    loader = UnstructuredHTMLLoader(p)
+                else:
+                    loader = TextLoader(p, encoding="utf-8")
+                docs.extend(loader.load())
+            except Exception as e:
+                self.chat.append(f"\n⚠️ Failed to load {os.path.basename(p)}: {str(e)}\n")
+
+        if not docs:
+            self.chat.append("\n❌ No documents loaded.\n")
+            return
+
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(docs)
+
+        embed = OllamaEmbeddings(model="nomic-embed-text:latest")
+
+        if os.path.exists("./rag_db"):
+            vectordb = Chroma(persist_directory="./rag_db", embedding_function=embed)
+            vectordb.add_documents(chunks)
+            self.chat.append(f"\n✅ Added {len(chunks)} new chunks to existing knowledge base!\n")
+        else:
+            vectordb = Chroma.from_documents(chunks, embed, persist_directory="./rag_db")
+            self.chat.append(f"\n✅ Created new knowledge base with {len(chunks)} chunks!\n")
+
+        vectordb.persist()
+        self.retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+        self.rag_documents_count += len(chunks)
+        self.clear_rag_btn.setEnabled(True)
+
+    def clear_rag_knowledge(self):
+        if os.path.exists("./rag_db"):
+            shutil.rmtree("./rag_db")
+        self.retriever = None
+        self.rag_documents_count = 0
+        self.clear_rag_btn.setEnabled(False)
+        self.chat.append("\n🗑️ RAG knowledge cleared!\n")
+
+    # ================= OTHER FUNCTIONS =================
     def open_model_manager(self):
         manager_file = "ollama_manager.py"
         if not os.path.exists(manager_file):
-            self.chat.append("\n❌ <b>ollama_manager.py</b> file not found in the same folder!\n")
-            QMessageBox.critical(self, "File Missing", f"Please place <b>{manager_file}</b> in the same directory as this app.")
+            self.chat.append("\n❌ <b>ollama_manager.py</b> file not found!\n")
+            QMessageBox.critical(self, "File Missing", f"Place <b>{manager_file}</b> in the same folder.")
             return
 
         try:
-            # আলাদা প্রসেসে ollama_manager.py চালানো
             subprocess.Popen([sys.executable, manager_file], cwd=os.path.dirname(__file__) or ".")
-            self.chat.append("\n🦙 <b>Ollama Model Manager</b> opened in a new window!\n")
-            self.chat.append("   Use it to pull, create, or remove models.\n")
+            self.chat.append("\n🦙 <b>Ollama Model Manager</b> opened!\n")
         except Exception as e:
-            self.chat.append(f"\n❌ Failed to open Model Manager: {str(e)}\n")
-            QMessageBox.critical(self, "Error", f"Could not launch ollama_manager.py:\n{str(e)}")
-    # ========================================================
+            self.chat.append(f"\n❌ Failed: {str(e)}\n")
 
-    # ========== সার্চ ফিল্টার ==========
     def filter_conversations(self):
         search_text = self.chat_search.text().strip().lower()
         self.conv_list.clear()
@@ -455,29 +606,53 @@ class OllamaGUI(QMainWindow):
             self.models.append(fallback)
             self.model_box.addItem(fallback + " (fallback)")
             self.chat.append(f"\n⚠️ <b>Ollama connection failed:</b> {str(e)}\n")
-            self.chat.append("🔄 Using fallback model. Please start Ollama server and restart BOFFIN.\n")
+            self.chat.append("🔄 Using fallback model. Please start Ollama server and restart the app.\n")
 
-    # ================= CREW METHODS =================
-    # (সব অপরিবর্তিত — নিচে কপি করা হয়েছে)
+    def new_chat(self):
+        self.current_conversation_id = None
+        self.last_user_prompt = ""
+        self.chat.clear()
+        self.update_stop_reload_button(is_running=False)
 
-    def refresh_crews_list(self):
-        self.crew_list.clear()
-        crews = self.db.list_crews()
-        for crew in crews:
-            prefix = "⭐ " if crew['is_default'] else ""
-            item = QListWidgetItem(f"{prefix}{crew['name']} ({len(json.loads(crew['config']))} agents)")
-            item.setData(Qt.UserRole, crew['id'])
-            self.crew_list.addItem(item)
-        self.update_current_crew_button()
+    def load_conversation(self, item):
+        self.current_conversation_id = item.data(Qt.UserRole)
+        self.chat.clear()
+        messages = self.db.get_messages(self.current_conversation_id)
+        for m in messages:
+            who = "🧑 YOU" if m["role"] == "user" else "🤖 BOFFIN"
+            self.chat.append(f"{who}:\n{m['content']}\n")
+        if messages and messages[-1]["role"] == "user":
+            self.last_user_prompt = messages[-1]["content"]
+        self.update_stop_reload_button(is_running=False)
 
-    def select_crew_from_list(self, item):
-        crew_id = item.data(Qt.UserRole)
-        crew = self.db.get_crew(crew_id)
-        self.current_crew_config = json.loads(crew['config'])
-        self.current_crew_id = crew_id
-        self.current_crew_name = crew['name']
-        self.update_current_crew_button()
-        self.chat.append(f"\n✅ Switched to crew: <b>{crew['name']}</b> ({len(self.current_crew_config)} agents)\n")
+    def export_chat(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Chat", "chat.md", "Markdown (*.md);;Text (*.txt)")
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.chat.toPlainText())
+
+    def show_conv_menu(self, pos):
+        item = self.conv_list.itemAt(pos)
+        if not item: return
+        cid = item.data(Qt.UserRole)
+        menu = QMenu()
+        rename_act = menu.addAction("✏ Rename")
+        pin_act = menu.addAction("📌 Pin / Unpin")
+        delete_act = menu.addAction("🗑 Delete")
+        action = menu.exec_(self.conv_list.mapToGlobal(pos))
+
+        if action == rename_act:
+            text, ok = QInputDialog.getText(self, "Rename Chat", "New title:")
+            if ok and text.strip():
+                self.db.rename_conversation(cid, text.strip())
+                self.refresh_conversations()
+        elif action == pin_act:
+            self.db.toggle_pin(cid)
+            self.refresh_conversations()
+        elif action == delete_act:
+            self.db.delete_conversation(cid)
+            self.new_chat()
+            self.refresh_conversations()
 
     def show_crew_menu(self, pos):
         item = self.crew_list.itemAt(pos)
@@ -581,6 +756,29 @@ class OllamaGUI(QMainWindow):
 
         self.chat.append("\n📎 Image attached – will be sent with the next message.\n")
 
+    def toggle_theme(self):
+        self.dark = not self.dark
+        self.apply_theme()
+
+    def refresh_crews_list(self):
+        self.crew_list.clear()
+        crews = self.db.list_crews()
+        for crew in crews:
+            prefix = "⭐ " if crew['is_default'] else ""
+            item = QListWidgetItem(f"{prefix}{crew['name']} ({len(json.loads(crew['config']))} agents)")
+            item.setData(Qt.UserRole, crew['id'])
+            self.crew_list.addItem(item)
+        self.update_current_crew_button()
+
+    def select_crew_from_list(self, item):
+        crew_id = item.data(Qt.UserRole)
+        crew = self.db.get_crew(crew_id)
+        self.current_crew_config = json.loads(crew['config'])
+        self.current_crew_id = crew_id
+        self.current_crew_name = crew['name']
+        self.update_current_crew_button()
+        self.chat.append(f"\n✅ Switched to crew: <b>{crew['name']}</b> ({len(self.current_crew_config)} agents)\n")
+
     def send(self):
         prompt = self.input.toPlainText().strip()
         if not prompt:
@@ -590,7 +788,10 @@ class OllamaGUI(QMainWindow):
         self.input.clear()
 
         if not self.current_conversation_id:
-            title = prompt[:30] + "..." if len(prompt) > 30 else prompt
+            sentences = prompt.split('. ')
+            title = sentences[0].strip()
+            if len(title) > 40:
+                title = title[:37] + "..."
             self.current_conversation_id = self.db.create_conversation(title=title)
             self.refresh_conversations()
 
@@ -614,8 +815,19 @@ class OllamaGUI(QMainWindow):
         for msg in history:
             m = {"role": msg["role"], "content": msg["content"]}
             if msg["role"] == "user" and msg == history[-1] and self.attached_image_base64:
-                m["images"] = [self.attached_image_base64]
+                m["content"] = [{"type": "text", "text": prompt}]
+                if self.attached_image_base64:
+                    m["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{self.attached_image_base64}"}})
             ollama_messages.append(m)
+
+        # RAG as system message
+        if self.retriever:
+            context_docs = self.retriever.invoke(prompt)
+            if context_docs:
+                rag_context = "\n\n".join([doc.page_content for doc in context_docs])
+                rag_block = "Use the following knowledge if relevant. If not relevant, ignore it.\n\n" + rag_context
+                ollama_messages.insert(-1, {"role": "system", "content": rag_block})
+                self.chat.append(f"\n🔍 Using {len(context_docs)} relevant knowledge chunks.\n")
 
         if self.advanced_mode:
             if not self.current_crew_config:
@@ -635,10 +847,6 @@ class OllamaGUI(QMainWindow):
         self.attached_image_path = None
         self.attached_image_base64 = None
 
-    def on_generation_finished(self, final=""):
-        self.save_assistant_reply(final)
-        self.update_stop_reload_button(is_running=False)
-
     def append_token(self, text):
         self.current_assistant_reply += text
         cursor = self.chat.textCursor()
@@ -650,80 +858,19 @@ class OllamaGUI(QMainWindow):
         scrollbar = self.chat.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def save_assistant_reply(self, final=""):
-        reply = final or self.current_assistant_reply.strip()
-        if reply:
-            self.db.add_message(self.current_conversation_id, "assistant", reply)
-        self.current_assistant_reply = ""
+    def on_generation_finished(self, response, elapsed, chunks):
+        if response:
+            if not self.thread.running:
+                response += "\n\n[GENERATION STOPPED BY USER]"
+            self.db.add_message(self.current_conversation_id, "assistant", response)
+        if chunks > 0:
+            speed = chunks / elapsed if elapsed > 0 else 0
+            self.chat.append(f"\n\n📊 Stats: {chunks} chunks streamed | {speed:.1f} chunks/s | {elapsed:.1f}s\n")
+        self.update_stop_reload_button(is_running=False)
 
     def show_error(self, e):
         self.chat.append(f"\n❌ Error: {e}\n")
         self.update_stop_reload_button(is_running=False)
-
-    def show_conv_menu(self, pos):
-        item = self.conv_list.itemAt(pos)
-        if not item: return
-        cid = item.data(Qt.UserRole)
-        menu = QMenu()
-        rename_act = menu.addAction("✏ Rename")
-        pin_act = menu.addAction("📌 Pin / Unpin")
-        delete_act = menu.addAction("🗑 Delete")
-        action = menu.exec_(self.conv_list.mapToGlobal(pos))
-
-        if action == rename_act:
-            text, ok = QInputDialog.getText(self, "Rename Chat", "New title:")
-            if ok and text.strip():
-                self.db.rename_conversation(cid, text.strip())
-                self.refresh_conversations()
-        elif action == pin_act:
-            self.db.toggle_pin(cid)
-            self.refresh_conversations()
-        elif action == delete_act:
-            self.db.delete_conversation(cid)
-            self.new_chat()
-            self.refresh_conversations()
-
-    def load_conversation(self, item):
-        self.current_conversation_id = item.data(Qt.UserRole)
-        self.chat.clear()
-        messages = self.db.get_messages(self.current_conversation_id)
-        for m in messages:
-            who = "🧑 YOU" if m["role"] == "user" else "🤖 BOFFIN"
-            self.chat.append(f"{who}:\n{m['content']}\n")
-        if messages and messages[-1]["role"] == "user":
-            self.last_user_prompt = messages[-1]["content"]
-        self.update_stop_reload_button(is_running=False)
-
-    def new_chat(self):
-        self.current_conversation_id = None
-        self.last_user_prompt = ""
-        self.chat.clear()
-        self.update_stop_reload_button(is_running=False)
-
-    def export_chat(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export Chat", "chat.md", "Markdown (*.md);;Text (*.txt)")
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(self.chat.toPlainText())
-
-    def toggle_theme(self):
-        self.dark = not self.dark
-        self.apply_theme()
-
-    def apply_theme(self):
-        if self.dark:
-            self.setStyleSheet("""
-                QMainWindow, QWidget { background:#121212; color:#e0e0e0; }
-                QTextEdit { background:#1e1e1e; color:#fff; }
-                QListWidget { background:#181818; color:#ddd; }
-                QPushButton { background:#333; color:white; border:none; padding:8px; border-radius:6px; }
-                QPushButton:hover { background:#555; }
-                QComboBox { background:#222; color:white; }
-                QLineEdit { background:#222; color:white; padding:6px; border-radius:6px; }
-            """)
-        else:
-            self.setStyleSheet("")
-
 
 if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)

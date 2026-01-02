@@ -1,30 +1,31 @@
 #!/bin/bash
 
-# Check ollama exists
+set -e
+
+# Check ollama
 if ! command -v ollama >/dev/null; then
-    echo "ollama is not installed"
+    echo "❌ ollama not installed"
     exit 1
 fi
 
 # Current version
 CURRENT_VERSION=$(ollama --version 2>/dev/null | awk '{print $NF}')
 
-# Latest version from GitHub
+# Latest version
 LATEST_VERSION=$(curl -fsSL https://api.github.com/repos/ollama/ollama/releases/latest \
   | grep '"tag_name"' | head -1 | cut -d '"' -f4 | sed 's/^v//')
 
-# Validate
 if [ -z "$CURRENT_VERSION" ] || [ -z "$LATEST_VERSION" ]; then
-    echo "Version check failed"
+    echo "❌ Version detection failed"
     exit 1
 fi
 
-echo "Current version : $CURRENT_VERSION"
-echo "Latest version  : $LATEST_VERSION"
+echo "Current Version: $CURRENT_VERSION"
+echo "Latest Version : $LATEST_VERSION"
 
-# Compare
-if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
-    echo "✅ Ollama is up to date"
+if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+    echo "⬆️ Updating ollama..."
+    curl -fsSL https://ollama.com/install.sh | sh
 else
-    echo "⬆️ Update available"
+    echo "✅ Already up to date"
 fi
