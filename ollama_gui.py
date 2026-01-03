@@ -8,15 +8,14 @@ import subprocess
 import glob
 import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor
+import mimetypes
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QComboBox, QLabel, QFileDialog,
     QListWidget, QListWidgetItem, QMenu, QInputDialog,
-    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QScrollArea, QMessageBox,
-    QProgressBar
+    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QScrollArea, QMessageBox, QProgressBar
 )
 
 from database.postgres import PostgresDB
@@ -62,9 +61,13 @@ class DirectOllamaThread(QThread):
                 r.raise_for_status()
                 for line in r.iter_lines():
                     if not self.running:
+                        r.close()
                         break
                     if line:
-                        data = json.loads(line.decode())
+                        try:
+                            data = json.loads(line.decode())
+                        except json.JSONDecodeError:
+                            continue
                         if "message" in data and "content" in data["message"]:
                             token = data["message"]["content"]
                             response += token
@@ -111,9 +114,13 @@ class CustomCrewThread(QThread):
                 r.raise_for_status()
                 for line in r.iter_lines():
                     if not self.running:
+                        r.close()
                         break
                     if line:
-                        data = json.loads(line.decode())
+                        try:
+                            data = json.loads(line.decode())
+                        except json.JSONDecodeError:
+                            continue
                         if "message" in data and "content" in data["message"]:
                             token = data["message"]["content"]
                             response += token
@@ -157,6 +164,76 @@ class CustomCrewThread(QThread):
             self.finished.emit(output, elapsed, self.total_chunks)
         else:
             self.finished.emit(output + "\n\n[GENERATION STOPPED BY USER]", elapsed, self.total_chunks)
+
+
+# ================= RAG WORKER THREAD =================
+class RAGWorker(QThread):
+    progress = pyqtSignal(int, int)  # done, total
+    message = pyqtSignal(str)
+    finished = pyqtSignal(object)  # retriever
+    error = pyqtSignal(str)
+
+    def __init__(self, paths):
+        super().__init__()
+        self.paths = paths
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+    def run(self):
+        try:
+            docs = []
+            for p in self.paths:
+                if not self.running:
+                    return
+                try:
+                    if p.lower().endswith(".pdf"):
+                        loader = PyPDFLoader(p)
+                    elif p.lower().endswith(".docx"):
+                        loader = Docx2txtLoader(p)
+                    elif p.lower().endswith(".md"):
+                        loader = UnstructuredMarkdownLoader(p)
+                    elif p.lower().endswith((".html", ".htm")):
+                        from langchain_community.document_loaders import UnstructuredHTMLLoader
+                        loader = UnstructuredHTMLLoader(p)
+                    else:
+                        loader = TextLoader(p, encoding="utf-8")
+                    docs.extend(loader.load())
+                except Exception as e:
+                    self.message.emit(f"⚠️ Failed to load {os.path.basename(p)}: {str(e)}")
+
+            if not self.running:
+                return
+
+            splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+            chunks = splitter.split_documents(docs)
+
+            embed = OllamaEmbeddings(model="nomic-embed-text:latest")
+
+            self.progress.emit(0, len(chunks))
+
+            persist_dir = os.path.join(os.path.expanduser("~"), ".ollama_gui", "rag_db")
+            os.makedirs(persist_dir, exist_ok=True)
+            vectordb = Chroma(
+                persist_directory=persist_dir,
+                embedding_function=embed,
+                collection_name=f"rag_{int(time.time())}"
+            )
+
+            batch_size = 10  # Small batch for fast cancel response
+            for i in range(0, len(chunks), batch_size):
+                if not self.running:
+                    return
+                batch = chunks[i:i+batch_size]
+                vectordb.add_documents(batch)
+                self.progress.emit(i + len(batch), len(chunks))
+
+            # NO persist() needed – Chroma auto-persists in new version
+            self.finished.emit(vectordb.as_retriever(search_kwargs={"k": 5}))
+
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # ================= CREW CONFIG DIALOG =================
@@ -273,10 +350,18 @@ class OllamaGUI(QMainWindow):
 
         self.attached_image_path = None
         self.attached_image_base64 = None
+        self.attached_image_mime = None
 
         # RAG
         self.retriever = None
         self.rag_documents_count = 0
+
+        # Model capabilities
+        self.model_caps = {
+            "llava": {"vision": True},
+            "qwen": {"vision": False},
+            # Add more as needed
+        }
 
         self.init_ui()
         self.load_models()
@@ -334,6 +419,13 @@ class OllamaGUI(QMainWindow):
         self.rag_btn.setMinimumHeight(50)
         left.addWidget(self.rag_btn)
 
+        self.cancel_rag_btn = QPushButton("❌ Cancel RAG")
+        self.cancel_rag_btn.clicked.connect(self.cancel_rag)
+        self.cancel_rag_btn.setStyleSheet("background: #a33; color: white; font-weight: bold; padding: 12px; border-radius: 8px;")
+        self.cancel_rag_btn.setMinimumHeight(50)
+        self.cancel_rag_btn.setVisible(False)
+        left.addWidget(self.cancel_rag_btn)
+
         self.clear_rag_btn = QPushButton("🗑️ Clear Knowledge")
         self.clear_rag_btn.clicked.connect(self.clear_rag_knowledge)
         self.clear_rag_btn.setStyleSheet("background: #a33; color: white; font-weight: bold; padding: 12px; border-radius: 8px;")
@@ -341,7 +433,7 @@ class OllamaGUI(QMainWindow):
         self.clear_rag_btn.setEnabled(False)
         left.addWidget(self.clear_rag_btn)
 
-        # Progress Bar for RAG
+        # RAG Progress Bar
         self.rag_progress = QProgressBar()
         self.rag_progress.setRange(0, 100)
         self.rag_progress.setValue(0)
@@ -450,7 +542,7 @@ class OllamaGUI(QMainWindow):
                 QListWidget::item[text^="⭐ "] { color: #ffaa00; font-weight: bold; }
                 QPushButton { background:#333; color:white; border:none; padding:12px; border-radius:8px; font-size: 18px; }
                 QPushButton:hover { background:#555; }
-                QProgressBar { background:#222; color:white; border-radius:8px; text-align:center; }
+                QProgressBar { background:#222; color:white; border-radius:8px; text-align:center; font-size: 16px; }
                 QProgressBar::chunk { background:#2d8; }
                 QComboBox { background:#222; color:white; padding:10px; font-size: 18px; }
                 QLineEdit { background:#222; color:white; padding:12px; border-radius:8px; font-size: 18px; }
@@ -467,13 +559,13 @@ class OllamaGUI(QMainWindow):
                 QListWidget::item[text^="⭐ "] { color: #fd7e14; font-weight: bold; }
                 QPushButton { background:#0d6efd; color:white; border:none; padding:12px; border-radius:8px; font-size: 18px; }
                 QPushButton:hover { background:#0b5ed7; }
-                QProgressBar { background:#e9ecef; color:#212529; border-radius:8px; text-align:center; }
+                QProgressBar { background:#e9ecef; color:#212529; border-radius:8px; text-align:center; font-size: 16px; }
                 QProgressBar::chunk { background:#0d6efd; }
                 QComboBox { background:#ffffff; color:#212529; padding:10px; font-size: 18px; border: 1px solid #ced4da; border-radius: 8px; }
                 QLineEdit { background:#ffffff; color:#212529; padding:12px; border-radius:8px; font-size: 18px; border: 1px solid #ced4da; }
             """)
 
-    # ================= OPTIMIZED RAG WITH PROGRESS BAR =================
+    # ================= RAG FUNCTIONS =================
     def add_rag_knowledge(self):
         files, _ = QFileDialog.getOpenFileNames(
             self, "Select Documents for RAG", "", "Documents (*.pdf *.txt *.md *.docx *.html)"
@@ -487,74 +579,66 @@ class OllamaGUI(QMainWindow):
         if not paths:
             return
 
-        docs = []
-        for p in paths:
-            try:
-                if p.lower().endswith(".pdf"):
-                    loader = PyPDFLoader(p)
-                elif p.lower().endswith(".docx"):
-                    loader = Docx2txtLoader(p)
-                elif p.lower().endswith(".md"):
-                    loader = UnstructuredMarkdownLoader(p)
-                elif p.lower().endswith((".html", ".htm")):
-                    from langchain_community.document_loaders import UnstructuredHTMLLoader
-                    loader = UnstructuredHTMLLoader(p)
-                else:
-                    loader = TextLoader(p, encoding="utf-8")
-                docs.extend(loader.load())
-            except Exception as e:
-                self.chat.append(f"\n⚠️ Failed to load {os.path.basename(p)}: {str(e)}\n")
-
-        if not docs:
-            self.chat.append("\n❌ No documents loaded.\n")
-            return
-
-        # Smaller chunks for faster embedding
-        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
-        chunks = splitter.split_documents(docs)
-
-        if not chunks:
-            self.chat.append("\n❌ No chunks created.\n")
-            return
-
-        embed = OllamaEmbeddings(model="nomic-embed-text:latest")  # Change to mxbai-embed-large if pulled
-
-        self.rag_progress.setMaximum(len(chunks))
+        self.rag_btn.setEnabled(False)
+        self.cancel_rag_btn.setVisible(True)
         self.rag_progress.setValue(0)
         self.rag_progress.setVisible(True)
-        self.chat.append("\n🔄 Processing chunks for embedding...\n")
+        self.chat.append("\n🔄 Building knowledge base...\n")
 
-        def batch_embed(batch):
-            texts = [c.page_content for c in batch]
-            return embed.embed_documents(texts)
+        self.rag_worker = RAGWorker(paths)
+        self.rag_worker.progress.connect(self.update_rag_progress)
+        self.rag_worker.message.connect(lambda m: self.chat.append(m))
+        self.rag_worker.finished.connect(self.on_rag_finished)
+        self.rag_worker.error.connect(self.on_rag_error)
+        self.rag_worker.start()
 
-        batch_size = 50
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            batches = [chunks[i:i+batch_size] for i in range(0, len(chunks), batch_size)]
-            for i, _ in enumerate(executor.map(batch_embed, batches)):
-                self.rag_progress.setValue((i+1) * batch_size)
+    def update_rag_progress(self, done, total):
+        self.rag_progress.setMaximum(total)
+        self.rag_progress.setValue(done)
 
-        if os.path.exists("./rag_db"):
-            vectordb = Chroma(persist_directory="./rag_db", embedding_function=embed)
-            vectordb.add_documents(chunks)
-            self.chat.append(f"\n✅ Added {len(chunks)} new chunks to existing knowledge base!\n")
-        else:
-            vectordb = Chroma.from_documents(chunks, embed, persist_directory="./rag_db")
-            self.chat.append(f"\n✅ Created new knowledge base with {len(chunks)} chunks!\n")
-
-        vectordb.persist()
-        self.retriever = vectordb.as_retriever(search_kwargs={"k": 5})
-        self.rag_documents_count += len(chunks)
-        self.clear_rag_btn.setEnabled(True)
+    def cancel_rag(self):
+        if hasattr(self, 'rag_worker') and self.rag_worker.isRunning():
+            self.rag_worker.stop()
+            self.chat.append("\n⚠️ RAG processing cancelled by user.\n")
+        self.cancel_rag_btn.setVisible(False)
         self.rag_progress.setVisible(False)
+        self.rag_btn.setEnabled(True)
+
+    def on_rag_finished(self, retriever):
+        self.retriever = retriever
+        self.cancel_rag_btn.setVisible(False)
+        self.rag_progress.setVisible(False)
+        self.rag_btn.setEnabled(True)
+        self.clear_rag_btn.setEnabled(True)
+        self.chat.append("\n✅ Knowledge base ready!\n")
+
+    def on_rag_error(self, err):
+        self.chat.append(f"\n❌ RAG Error: {err}\n")
+        self.cancel_rag_btn.setVisible(False)
+        self.rag_progress.setVisible(False)
+        self.rag_btn.setEnabled(True)
 
     def clear_rag_knowledge(self):
-        if os.path.exists("./rag_db"):
-            shutil.rmtree("./rag_db")
+        if hasattr(self, "rag_worker") and self.rag_worker.isRunning():
+            QMessageBox.warning(self, "Busy", "RAG is still running! Please wait or cancel.")
+            return
+        reply = QMessageBox.question(
+            self, "Restart Required",
+            "RAG database will be cleared.\nApp must restart.\nContinue?"
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        persist_dir = os.path.join(os.path.expanduser("~"), ".ollama_gui", "rag_db")
+        if os.path.exists(persist_dir):
+            shutil.rmtree(persist_dir, ignore_errors=True)
+
         self.retriever = None
         self.rag_documents_count = 0
         self.clear_rag_btn.setEnabled(False)
-        self.chat.append("\n🗑️ RAG knowledge cleared!\n")
+
+        QMessageBox.information(self, "Done", "RAG cleared. Please restart the app.")
+        QApplication.quit()
 
     # ================= REST OF FUNCTIONS (ALL INCLUDED) =================
     # (open_model_manager, filter_conversations, stop_or_reload, update_stop_reload_button, update_current_crew_button, load_models, new_chat, load_conversation, export_chat, show_conv_menu, show_crew_menu, create_new_crew, edit_crew, delete_crew, set_default_crew, open_current_crew, toggle_advanced_mode, attach_image, toggle_theme, refresh_crews_list, select_crew_from_list, send, append_token, on_generation_finished, show_error)
@@ -790,6 +874,7 @@ class OllamaGUI(QMainWindow):
         self.attached_image_path = path
         with open(path, "rb") as f:
             self.attached_image_base64 = base64.b64encode(f.read()).decode('utf-8')
+        self.attached_image_mime = mimetypes.guess_type(path)[0] or "image/jpeg"
 
         self.chat.append("\n📎 Image attached – will be sent with the next message.\n")
 
@@ -847,22 +932,24 @@ class OllamaGUI(QMainWindow):
 
         self.update_stop_reload_button(is_running=True)
 
-        history = self.db.get_messages(self.current_conversation_id)
+        # Trim history to last 10 messages to prevent DB bloat
+        history = self.db.get_messages(self.current_conversation_id)[-10:]
         ollama_messages = []
         for msg in history:
             m = {"role": msg["role"], "content": msg["content"]}
             if msg["role"] == "user" and msg == history[-1] and self.attached_image_base64:
                 m["content"] = [{"type": "text", "text": prompt}]
                 if self.attached_image_base64:
-                    m["content"].append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{self.attached_image_base64}"}})
+                    m["content"].append({"type": "image_url", "image_url": {"url": f"data:{self.attached_image_mime};base64,{self.attached_image_base64}"}})
             ollama_messages.append(m)
 
-        # RAG as system message just before user message
+        # RAG as system message
         if self.retriever:
             context_docs = self.retriever.invoke(prompt)
             if context_docs:
                 rag_context = "\n\n".join([doc.page_content for doc in context_docs])
-                rag_block = "Use the following knowledge if relevant. If not relevant, ignore it.\n\n" + rag_context
+                rag_context = rag_context[:4000]  # Limit to prevent overflow
+                rag_block = "Use ONLY facts from the following knowledge if relevant. If unsure or not found, say 'not found'. Ignore if not relevant.\n\n" + rag_context
                 ollama_messages.insert(-1, {"role": "system", "content": rag_block})
                 self.chat.append(f"\n🔍 Using {len(context_docs)} relevant knowledge chunks.\n")
 
@@ -871,9 +958,18 @@ class OllamaGUI(QMainWindow):
                 self.chat.append("\n❌ No crew selected!\n")
                 self.update_stop_reload_button(is_running=False)
                 return
+            # Inject RAG into first agent if crew mode
+            if self.retriever and ollama_messages and "system" in ollama_messages[-2].get("role", ""):
+                first_agent_system = self.current_crew_config[0].get('system_prompt', '')
+                self.current_crew_config[0]['system_prompt'] = first_agent_system + "\n\n" + rag_block if first_agent_system else rag_block
             self.thread = CustomCrewThread(prompt, self.current_crew_config, ollama_messages[:-1])
         else:
             model = self.model_box.currentText().split(" (")[0]
+            # Check model capabilities
+            caps = self.model_caps.get(model.split(":")[0], {"vision": False})
+            if self.attached_image_base64 and not caps.get("vision"):
+                self.chat.append("\n⚠️ Selected model does not support vision. Image ignored.\n")
+                self.attached_image_base64 = None
             self.thread = DirectOllamaThread(model, ollama_messages)
 
         self.thread.token.connect(self.append_token)
@@ -883,6 +979,7 @@ class OllamaGUI(QMainWindow):
 
         self.attached_image_path = None
         self.attached_image_base64 = None
+        self.attached_image_mime = None
 
     def append_token(self, text):
         self.current_assistant_reply += text
@@ -901,8 +998,8 @@ class OllamaGUI(QMainWindow):
                 response += "\n\n[GENERATION STOPPED BY USER]"
             self.db.add_message(self.current_conversation_id, "assistant", response)
         if chunks > 0:
-            speed = chunks / elapsed if elapsed > 0 else 0
-            self.chat.append(f"\n\n📊 Stats: {chunks} chunks streamed | {speed:.1f} chunks/s | {elapsed:.1f}s\n")
+            speed = len(response) / elapsed if elapsed > 0 else 0
+            self.chat.append(f"\n\n📊 Stats: {len(response)} chars streamed | {speed:.1f} chars/s | {elapsed:.1f}s\n")
         self.update_stop_reload_button(is_running=False)
 
     def show_error(self, e):
