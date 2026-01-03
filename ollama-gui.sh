@@ -19,6 +19,7 @@ cleanup() {
 }
 
 # The cleanup function will run when the script is stopped by a signal (CTRL+C or window close).
+
 trap cleanup EXIT SIGINT SIGTERM
 
 # Start Postgres DataBase
