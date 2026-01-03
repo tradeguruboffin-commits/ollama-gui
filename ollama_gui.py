@@ -9,6 +9,7 @@ import glob
 import shutil
 import time
 import mimetypes
+import copy
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
@@ -602,6 +603,7 @@ class OllamaGUI(QMainWindow):
             self.chat.append("\n⚠️ RAG processing cancelled by user.\n")
         self.cancel_rag_btn.setVisible(False)
         self.rag_progress.setVisible(False)
+        self.rag_progress.reset()
         self.rag_btn.setEnabled(True)
 
     def on_rag_finished(self, retriever):
@@ -938,9 +940,9 @@ class OllamaGUI(QMainWindow):
         for msg in history:
             m = {"role": msg["role"], "content": msg["content"]}
             if msg["role"] == "user" and msg == history[-1] and self.attached_image_base64:
-                m["content"] = [{"type": "text", "text": prompt}]
+                m["content"] = prompt
                 if self.attached_image_base64:
-                    m["content"].append({"type": "image_url", "image_url": {"url": f"data:{self.attached_image_mime};base64,{self.attached_image_base64}"}})
+                    m["images"] = [self.attached_image_base64]
             ollama_messages.append(m)
 
         # RAG as system message
@@ -959,15 +961,17 @@ class OllamaGUI(QMainWindow):
                 self.update_stop_reload_button(is_running=False)
                 return
             # Inject RAG into first agent if crew mode
-            if self.retriever and ollama_messages and "system" in ollama_messages[-2].get("role", ""):
-                first_agent_system = self.current_crew_config[0].get('system_prompt', '')
-                self.current_crew_config[0]['system_prompt'] = first_agent_system + "\n\n" + rag_block if first_agent_system else rag_block
-            self.thread = CustomCrewThread(prompt, self.current_crew_config, ollama_messages[:-1])
+            if self.retriever and self.current_crew_config:
+                crew_cfg = copy.deepcopy(self.current_crew_config)
+                first_agent_system = crew_cfg[0].get('system_prompt', '')
+                crew_cfg[0]['system_prompt'] = first_agent_system + "\n\n" + rag_block if first_agent_system else rag_block
+                self.thread = CustomCrewThread(prompt, crew_cfg, ollama_messages[:-1])
         else:
             model = self.model_box.currentText().split(" (")[0]
             # Check model capabilities
-            caps = self.model_caps.get(model.split(":")[0], {"vision": False})
-            if self.attached_image_base64 and not caps.get("vision"):
+            model_base = model.lower()
+            vision = any(k in model_base for k in ("llava", "vision", "vl", "bakllava", "moondream"))
+            if self.attached_image_base64 and not vision:
                 self.chat.append("\n⚠️ Selected model does not support vision. Image ignored.\n")
                 self.attached_image_base64 = None
             self.thread = DirectOllamaThread(model, ollama_messages)
