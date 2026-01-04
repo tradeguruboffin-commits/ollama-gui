@@ -2,8 +2,7 @@ Ollama GUI UnofficialGitHub License
 PyPI - Version
 PyPI - Python VersionA feature-rich, unofficial Ollama GUI built with PyQt5, designed for advanced local AI interactions. This project extends the original Ollama capabilities with multi-crew agents, RAG support, and more. No additional dependencies beyond standard Python libraries and required packages.This is an Unofficial ForkThis is an enhanced, unofficial version of Ollama GUI, focusing on advanced features like crew workflows, RAG knowledge integration, and database-backed chat history. Ideal for developers and power users.
 Install via Pi-Apps (if on Raspberry Pi) or follow the instructions below.
-![badge](https://github.com/tradeguruboffin-commits/ollama-gui/Screenshot/Screenshot_2026-01-04_15-15-22.png?raw=true)ollama-gui-screenshot 
-![badge](https://github.com/tradeguruboffin-commits/ollama-gui/Screenshot/Screenshot_2026-01-04_15-16-10.png?raw=true)ollama-gui-screenshot <!-- আপনার স্ক্রিনশট লিঙ্ক অ্যাড করুন --> FeaturesCore Features Multi-file project with modular structure.
+![badge](https://github.com/tradeguruboffin-commits/ollama-gui/Screenshot/Screenshot_2026-01-04_15-15-22.png?raw=true)ollama-gui-screenshot <!-- আপনার স্ক্রিনশট লিঙ্ক অ্যাড করুন --> FeaturesCore Features Multi-file project with modular structure.
  Dependencies: PyQt5, requests, langchain (for RAG), PostgreSQL (for chat history).
  Auto-detect Ollama models and server status.
  Custom Ollama host support.
