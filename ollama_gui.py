@@ -11,6 +11,7 @@ import time
 import mimetypes
 import copy
 import hashlib
+import threading
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMutex, QMutexLocker, QTimer
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
@@ -32,101 +33,118 @@ except Exception:
             os.makedirs(db_dir, exist_ok=True)
             db_path = os.path.join(db_dir, "chat.db")
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
+            self.lock = threading.Lock()
             self.create_tables()
 
         def create_tables(self):
-            c = self.conn.cursor()
-            c.execute('''CREATE TABLE IF NOT EXISTS conversations
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, pinned INTEGER DEFAULT 0)''')
-            c.execute('''CREATE TABLE IF NOT EXISTS messages
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER,
-                          role TEXT, content TEXT)''')
-            c.execute('''CREATE TABLE IF NOT EXISTS crews
-                         (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE,
-                          config TEXT, is_default INTEGER DEFAULT 0)''')
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute('''CREATE TABLE IF NOT EXISTS conversations
+                             (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, pinned INTEGER DEFAULT 0)''')
+                c.execute('''CREATE TABLE IF NOT EXISTS messages
+                             (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER,
+                              role TEXT, content TEXT)''')
+                c.execute('''CREATE TABLE IF NOT EXISTS crews
+                             (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE,
+                              config TEXT, is_default INTEGER DEFAULT 0)''')
+                self.conn.commit()
 
         def create_conversation(self, title=None):
-            c = self.conn.cursor()
-            c.execute("INSERT INTO conversations (title) VALUES (?)", (title,))
-            self.conn.commit()
-            return c.lastrowid
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("INSERT INTO conversations (title) VALUES (?)", (title,))
+                self.conn.commit()
+                return c.lastrowid
 
         def list_conversations(self):
-            c = self.conn.cursor()
-            c.execute("SELECT id, title, pinned FROM conversations ORDER BY id DESC")
-            return [{"id": r[0], "title": r[1], "pinned": bool(r[2])} for r in c.fetchall()]
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("SELECT id, title, pinned FROM conversations ORDER BY id DESC")
+                return [{"id": r[0], "title": r[1], "pinned": bool(r[2])} for r in c.fetchall()]
 
         def rename_conversation(self, cid, title):
-            c = self.conn.cursor()
-            c.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, cid))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, cid))
+                self.conn.commit()
 
         def toggle_pin(self, cid):
-            c = self.conn.cursor()
-            c.execute("UPDATE conversations SET pinned = NOT pinned WHERE id = ?", (cid,))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("UPDATE conversations SET pinned = NOT pinned WHERE id = ?", (cid,))
+                self.conn.commit()
 
         def delete_conversation(self, cid):
-            c = self.conn.cursor()
-            c.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
-            c.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
+                c.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+                self.conn.commit()
 
         def add_message(self, cid, role, content):
-            c = self.conn.cursor()
-            c.execute("INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
-                      (cid, role, content))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+                          (cid, role, content))
+                self.conn.commit()
 
         def get_messages(self, cid):
-            c = self.conn.cursor()
-            c.execute("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC", (cid,))
-            return [{"role": r[0], "content": r[1]} for r in c.fetchall()]
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id ASC", (cid,))
+                return [{"role": r[0], "content": r[1]} for r in c.fetchall()]
 
         def create_crew(self, name, config):
-            c = self.conn.cursor()
-            c.execute("INSERT INTO crews (name, config) VALUES (?, ?)", (name, json.dumps(config)))
-            self.conn.commit()
-            return c.lastrowid
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("INSERT INTO crews (name, config) VALUES (?, ?)", (name, json.dumps(config)))
+                self.conn.commit()
+                return c.lastrowid
 
         def list_crews(self):
-            c = self.conn.cursor()
-            c.execute("SELECT id, name, config, is_default FROM crews")
-            return [{"id": r[0], "name": r[1], "config": r[2], "is_default": bool(r[3])} for r in c.fetchall()]
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("SELECT id, name, config, is_default FROM crews")
+                return [{"id": r[0], "name": r[1], "config": r[2], "is_default": bool(r[3])} for r in c.fetchall()]
 
         def get_crew(self, crew_id):
-            c = self.conn.cursor()
-            c.execute("SELECT name, config FROM crews WHERE id = ?", (crew_id,))
-            row = c.fetchone()
-            return {"name": row[0], "config": row[1]} if row else None
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("SELECT name, config FROM crews WHERE id = ?", (crew_id,))
+                row = c.fetchone()
+                return {"name": row[0], "config": row[1]} if row else None
 
         def update_crew(self, crew_id, name, config):
-            c = self.conn.cursor()
-            c.execute("UPDATE crews SET name = ?, config = ? WHERE id = ?", (name, json.dumps(config), crew_id))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("UPDATE crews SET name = ?, config = ? WHERE id = ?", (name, json.dumps(config), crew_id))
+                self.conn.commit()
 
         def update_crew_name(self, crew_id, name):
-            c = self.conn.cursor()
-            c.execute("UPDATE crews SET name = ? WHERE id = ?", (name, crew_id))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("UPDATE crews SET name = ? WHERE id = ?", (name, crew_id))
+                self.conn.commit()
 
         def delete_crew(self, crew_id):
-            c = self.conn.cursor()
-            c.execute("DELETE FROM crews WHERE id = ?", (crew_id,))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("DELETE FROM crews WHERE id = ?", (crew_id,))
+                self.conn.commit()
 
         def set_default_crew(self, crew_id):
-            c = self.conn.cursor()
-            c.execute("UPDATE crews SET is_default = 0")
-            c.execute("UPDATE crews SET is_default = 1 WHERE id = ?", (crew_id,))
-            self.conn.commit()
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("UPDATE crews SET is_default = 0")
+                c.execute("UPDATE crews SET is_default = 1 WHERE id = ?", (crew_id,))
+                self.conn.commit()
 
         def get_default_crew_config(self):
-            c = self.conn.cursor()
-            c.execute("SELECT config FROM crews WHERE is_default = 1 LIMIT 1")
-            row = c.fetchone()
-            return json.loads(row[0]) if row else None
+            with self.lock:
+                c = self.conn.cursor()
+                c.execute("SELECT config FROM crews WHERE is_default = 1 LIMIT 1")
+                row = c.fetchone()
+                return json.loads(row[0]) if row else None
 
     DB_CLASS = SQLiteDB
 
@@ -148,6 +166,8 @@ class DirectOllamaThread(QThread):
         self._running = True
         self.start_time = None
         self.chunk_count = 0
+        self.buffer = ""
+        self.last_flush = 0
 
     def stop(self):
         with QMutexLocker(self.mutex):
@@ -178,9 +198,16 @@ class DirectOllamaThread(QThread):
                             token = data["message"]["content"]
                             response += token
                             self.chunk_count += 1
-                            self.token.emit(token)
+                            self.buffer += token
+                            now = time.time()
+                            if now - self.last_flush > 0.05:
+                                self.token.emit(self.buffer)
+                                self.buffer = ""
+                                self.last_flush = now
                         if data.get("done"):
                             break
+            if self.buffer:
+                self.token.emit(self.buffer)
             elapsed = time.time() - self.start_time
             self.finished.emit(response.strip(), elapsed, self.chunk_count)
         except Exception as e:
@@ -200,6 +227,8 @@ class CustomCrewThread(QThread):
         self._running = True
         self.start_time = None
         self.total_chunks = 0
+        self.buffer = ""
+        self.last_flush = 0
 
     def stop(self):
         with QMutexLocker(self.mutex):
@@ -229,9 +258,16 @@ class CustomCrewThread(QThread):
                             token = data["message"]["content"]
                             response += token
                             self.total_chunks += 1
-                            self.token.emit(token)
+                            self.buffer += token
+                            now = time.time()
+                            if now - self.last_flush > 0.05:
+                                self.token.emit(self.buffer)
+                                self.buffer = ""
+                                self.last_flush = now
         except Exception as e:
-            self.token.emit(f"\n[ERROR in {model}: {str(e)}]\n")
+            self.error.emit(f"[ERROR in {model}: {str(e)}]")
+        if self.buffer:
+            self.token.emit(self.buffer)
         return response.strip()
 
     def run(self):
@@ -254,9 +290,9 @@ class CustomCrewThread(QThread):
                 messages.append({"role": "system", "content": system_prompt})
 
             if i == 1 and self.history_messages:
-                history_context = "\n\nPrevious conversation:\n" + "\n".join(
-                    [f"{m['role'].upper()}: {m['content']}" for m in self.history_messages[-8:]])
-                input_prompt += history_context
+                user_history = [m['content'] for m in self.history_messages if m['role'] == 'user'][-6:]
+                if user_history:
+                    input_prompt += "\n\nPrevious user messages:\n" + "\n".join(user_history)
 
             messages.append({"role": "user", "content": input_prompt})
 
@@ -320,6 +356,7 @@ class RAGWorker(QThread):
                     loaded = loader.load()
                     for d in loaded:
                         d.metadata["file_hash"] = file_hash
+                        d.metadata["source"] = os.path.basename(p)
                     docs.extend(loaded)
                 except Exception as e:
                     self.message.emit(f"Failed: {os.path.basename(p)} - {str(e)}")
@@ -345,7 +382,8 @@ class RAGWorker(QThread):
             for i in range(0, len(new_chunks), batch_size):
                 if not self.is_running():
                     return
-                vectordb.add_documents(new_chunks[i:i+batch_size])
+                batch = new_chunks[i:i+batch_size]
+                vectordb.add_documents(batch)
                 self.progress.emit(i + batch_size, len(new_chunks))
 
             self.finished.emit(vectordb.as_retriever(search_kwargs={"k": 5}))
@@ -473,6 +511,7 @@ class OllamaGUI(QMainWindow):
         self.resize(1700, 900)
 
         self.db = DB_CLASS()
+        self.db_mutex = QMutex()
         self.current_conversation_id = None
         self.thread = None
         self.dark = True
@@ -800,7 +839,8 @@ class OllamaGUI(QMainWindow):
     def load_conversation(self, item):
         self.current_conversation_id = item.data(Qt.UserRole)
         self.chat.clear()
-        messages = self.db.get_messages(self.current_conversation_id)
+        with QMutexLocker(self.db_mutex):
+            messages = self.db.get_messages(self.current_conversation_id)
         for m in messages:
             who = "🧑 YOU" if m["role"] == "user" else "🤖 BOFFIN"
             self.chat.append(f"{who}:\n{m['content']}\n")
@@ -826,13 +866,16 @@ class OllamaGUI(QMainWindow):
         if action == rename_act:
             text, ok = QInputDialog.getText(self, "Rename Chat", "New title:")
             if ok and text.strip():
-                self.db.rename_conversation(cid, text.strip())
+                with QMutexLocker(self.db_mutex):
+                    self.db.rename_conversation(cid, text.strip())
                 self.refresh_conversations()
         elif action == pin_act:
-            self.db.toggle_pin(cid)
+            with QMutexLocker(self.db_mutex):
+                self.db.toggle_pin(cid)
             self.refresh_conversations()
         elif action == delete_act:
-            self.db.delete_conversation(cid)
+            with QMutexLocker(self.db_mutex):
+                self.db.delete_conversation(cid)
             self.new_chat()
             self.refresh_conversations()
 
@@ -850,7 +893,8 @@ class OllamaGUI(QMainWindow):
             if action == rename_act:
                 new_name, ok = QInputDialog.getText(self, "Rename Crew", "New crew name:", text=crew['name'])
                 if ok and new_name.strip() and new_name.strip() != crew['name']:
-                    self.db.update_crew_name(crew_id, new_name.strip())
+                    with QMutexLocker(self.db_mutex):
+                        self.db.update_crew_name(crew_id, new_name.strip())
                     self.refresh_crews_list()
                     if crew_id == self.current_crew_id:
                         self.current_crew_name = new_name.strip()
@@ -864,7 +908,8 @@ class OllamaGUI(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             name, config = dialog.get_crew_data()
             if name and config:
-                new_id = self.db.create_crew(name, config)
+                with QMutexLocker(self.db_mutex):
+                    new_id = self.db.create_crew(name, config)
                 self.refresh_crews_list()
                 self.current_crew_id = new_id
                 self.current_crew_name = name
@@ -879,7 +924,8 @@ class OllamaGUI(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             name, new_config = dialog.get_crew_data()
             if name and new_config:
-                self.db.update_crew(crew_id, name, new_config)
+                with QMutexLocker(self.db_mutex):
+                    self.db.update_crew(crew_id, name, new_config)
                 if crew_id == self.current_crew_id:
                     self.current_crew_config = new_config
                     self.current_crew_name = name
@@ -891,7 +937,8 @@ class OllamaGUI(QMainWindow):
         crew = self.db.get_crew(crew_id)
         reply = QMessageBox.question(self, "Delete Crew", f"Delete crew '{crew['name']}'?")
         if reply == QMessageBox.Yes:
-            self.db.delete_crew(crew_id)
+            with QMutexLocker(self.db_mutex):
+                self.db.delete_crew(crew_id)
             if crew_id == self.current_crew_id:
                 self.current_crew_config = []
                 self.current_crew_id = None
@@ -900,8 +947,9 @@ class OllamaGUI(QMainWindow):
             self.refresh_crews_list()
 
     def set_default_crew(self, crew_id):
-        self.db.set_default_crew(crew_id)
-        crew = self.db.get_crew(crew_id)
+        with QMutexLocker(self.db_mutex):
+            self.db.set_default_crew(crew_id)
+            crew = self.db.get_crew(crew_id)
         self.current_crew_id = crew_id
         self.current_crew_config = json.loads(crew['config'])
         self.current_crew_name = crew['name']
@@ -929,7 +977,11 @@ class OllamaGUI(QMainWindow):
         crews = self.db.list_crews()
         for crew in crews:
             prefix = "⭐ " if crew['is_default'] else ""
-            item = QListWidgetItem(f"{prefix}{crew['name']} ({len(json.loads(crew['config']))} agents)")
+            agents = len(json.loads(crew['config']))
+            item_text = f"{prefix}{crew['name']} ({agents} agents)"
+            item = QListWidgetItem(item_text)
+            roles = " | ".join(a['role'] for a in json.loads(crew['config']))
+            item.setToolTip(roles)
             item.setData(Qt.UserRole, crew['id'])
             self.crew_list.addItem(item)
         self.update_current_crew_button()
@@ -952,7 +1004,8 @@ class OllamaGUI(QMainWindow):
             if dialog.exec_() == QDialog.Accepted:
                 new_name, config = dialog.get_crew_data()
                 if new_name and config:
-                    nid = self.db.create_crew(new_name, config)
+                    with QMutexLocker(self.db_mutex):
+                        nid = self.db.create_crew(new_name, config)
                     self.refresh_crews_list()
                     self.chat.append(f"\n✅ Template '{name}' loaded as '{new_name}'\n")
 
@@ -966,10 +1019,12 @@ class OllamaGUI(QMainWindow):
 
         if not self.current_conversation_id:
             title = prompt.split('.')[0][:40] + ("..." if len(prompt.split('.')[0]) > 40 else "")
-            self.current_conversation_id = self.db.create_conversation(title)
+            with QMutexLocker(self.db_mutex):
+                self.current_conversation_id = self.db.create_conversation(title)
             self.refresh_conversations()
 
-        self.db.add_message(self.current_conversation_id, "user", prompt)
+        with QMutexLocker(self.db_mutex):
+            self.db.add_message(self.current_conversation_id, "user", prompt)
         self.chat.append(f"\n🧑 YOU:\n{prompt}\n")
         if self.attached_image_path:
             cursor = self.chat.textCursor()
@@ -981,12 +1036,12 @@ class OllamaGUI(QMainWindow):
         self.update_stop_reload_button(True)
 
         max_hist = 20 if self.advanced_mode else 10
-        history = self.db.get_messages(self.current_conversation_id)[-max_hist:]
+        with QMutexLocker(self.db_mutex):
+            history = self.db.get_messages(self.current_conversation_id)[-max_hist:]
         ollama_messages = [{"role": m["role"], "content": m["content"]} for m in history]
 
         if self.attached_image_base64:
-            ollama_messages[-1]["content"] = prompt
-            ollama_messages[-1]["images"] = [self.attached_image_base64]
+            ollama_messages.append({"role": "user", "content": prompt, "images": [self.attached_image_base64]})
 
         if self.retriever:
             docs = self.retriever.invoke(prompt)
@@ -1033,7 +1088,8 @@ class OllamaGUI(QMainWindow):
         if response:
             if hasattr(self.thread, 'is_running') and not self.thread.is_running():
                 response += "\n\n[GENERATION STOPPED BY USER]"
-            self.db.add_message(self.current_conversation_id, "assistant", response)
+            with QMutexLocker(self.db_mutex):
+                self.db.add_message(self.current_conversation_id, "assistant", response)
         if chunks:
             speed = len(response) / elapsed if elapsed > 0 else 0
             self.chat.append(f"\n\n📊 {len(response)} chars | {speed:.1f} chars/s | {elapsed:.1f}s\n")
