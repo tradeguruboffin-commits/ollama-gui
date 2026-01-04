@@ -153,6 +153,45 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
 
+class OllamaClient:
+    def __init__(self, base_url="http://localhost:11434/api/chat", timeout=300, retries=3):
+        self.base_url = base_url
+        self.timeout = timeout
+        self.retries = retries
+
+    def chat_stream(self, model, messages, temperature=0.7):
+        payload = {"model": model, "messages": messages, "stream": True, "options": {"temperature": temperature}}
+        for attempt in range(self.retries):
+            try:
+                with requests.post(self.base_url, json=payload, stream=True, timeout=self.timeout) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if line:
+                            try:
+                                data = json.loads(line.decode())
+                                if "message" in data and "content" in data["message"]:
+                                    yield data["message"]["content"]
+                                if data.get("done"):
+                                    return
+                            except json.JSONDecodeError as e:
+                                raise ValueError(f"JSON decode error: {str(e)}")
+            except requests.exceptions.HTTPError as e:
+                if r.status_code == 404:
+                    raise ValueError(f"Model not found: {model}")
+                elif r.status_code == 500:
+                    raise RuntimeError("Server error in Ollama")
+                else:
+                    raise RuntimeError(f"HTTP error: {str(e)}")
+            except requests.exceptions.Timeout:
+                if attempt < self.retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise TimeoutError("Request timed out after retries")
+            except requests.exceptions.ConnectionError:
+                raise ConnectionError("Ollama not responding")
+            except Exception as e:
+                raise RuntimeError(f"Unexpected error: {str(e)}")
+
 class DirectOllamaThread(QThread):
     token = pyqtSignal(str)
     error = pyqtSignal(str)
@@ -168,6 +207,7 @@ class DirectOllamaThread(QThread):
         self.chunk_count = 0
         self.buffer = ""
         self.last_flush = 0
+        self.client = OllamaClient()
 
     def stop(self):
         with QMutexLocker(self.mutex):
@@ -181,37 +221,25 @@ class DirectOllamaThread(QThread):
         self.start_time = time.time()
         response = ""
         try:
-            url = "http://localhost:11434/api/chat"
-            payload = {"model": self.model, "messages": self.messages, "stream": True, "options": {"temperature": 0.7}}
-            with requests.post(url, json=payload, stream=True, timeout=300) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not self.is_running():
-                        r.close()
-                        break
-                    if line:
-                        try:
-                            data = json.loads(line.decode())
-                        except json.JSONDecodeError:
-                            continue
-                        if "message" in data and "content" in data["message"]:
-                            token = data["message"]["content"]
-                            response += token
-                            self.chunk_count += 1
-                            self.buffer += token
-                            now = time.time()
-                            if now - self.last_flush > 0.05:
-                                self.token.emit(self.buffer)
-                                self.buffer = ""
-                                self.last_flush = now
-                        if data.get("done"):
-                            break
+            for token in self.client.chat_stream(self.model, self.messages):
+                if not self.is_running():
+                    break
+                response += token
+                self.chunk_count += 1
+                self.buffer += token
+                now = time.time()
+                if now - self.last_flush > 0.05:
+                    self.token.emit(self.buffer)
+                    self.buffer = ""
+                    self.last_flush = now
             if self.buffer:
                 self.token.emit(self.buffer)
             elapsed = time.time() - self.start_time
             self.finished.emit(response.strip(), elapsed, self.chunk_count)
-        except Exception as e:
+        except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
             self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"Unexpected error: {str(e)}")
 
 class CustomCrewThread(QThread):
     token = pyqtSignal(str)
@@ -229,6 +257,7 @@ class CustomCrewThread(QThread):
         self.total_chunks = 0
         self.buffer = ""
         self.last_flush = 0
+        self.client = OllamaClient()
 
     def stop(self):
         with QMutexLocker(self.mutex):
@@ -241,31 +270,21 @@ class CustomCrewThread(QThread):
     def run_agent_inline(self, model, messages):
         response = ""
         try:
-            url = "http://localhost:11434/api/chat"
-            payload = {"model": model, "messages": messages, "stream": True, "options": {"temperature": 0.7}}
-            with requests.post(url, json=payload, stream=True, timeout=300) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not self.is_running():
-                        r.close()
-                        break
-                    if line:
-                        try:
-                            data = json.loads(line.decode())
-                        except json.JSONDecodeError:
-                            continue
-                        if "message" in data and "content" in data["message"]:
-                            token = data["message"]["content"]
-                            response += token
-                            self.total_chunks += 1
-                            self.buffer += token
-                            now = time.time()
-                            if now - self.last_flush > 0.05:
-                                self.token.emit(self.buffer)
-                                self.buffer = ""
-                                self.last_flush = now
-        except Exception as e:
+            for token in self.client.chat_stream(model, messages):
+                if not self.is_running():
+                    break
+                response += token
+                self.total_chunks += 1
+                self.buffer += token
+                now = time.time()
+                if now - self.last_flush > 0.05:
+                    self.token.emit(self.buffer)
+                    self.buffer = ""
+                    self.last_flush = now
+        except (ValueError, RuntimeError, TimeoutError, ConnectionError) as e:
             self.error.emit(f"[ERROR in {model}: {str(e)}]")
+        except Exception as e:
+            self.error.emit(f"[Unexpected error in {model}: {str(e)}]")
         if self.buffer:
             self.token.emit(self.buffer)
         return response.strip()
@@ -312,9 +331,10 @@ class RAGWorker(QThread):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, paths):
+    def __init__(self, paths, embedding_model="nomic-embed-text:latest"):
         super().__init__()
         self.paths = paths
+        self.embedding_model = embedding_model
         self.mutex = QMutex()
         self._running = True
 
@@ -367,7 +387,7 @@ class RAGWorker(QThread):
             splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
             chunks = splitter.split_documents(docs)
 
-            embed = OllamaEmbeddings(model="nomic-embed-text:latest")
+            embed = OllamaEmbeddings(model=self.embedding_model)
 
             persist_dir = os.path.join(os.path.expanduser("~"), ".ollama_gui", "rag_db")
             os.makedirs(persist_dir, exist_ok=True)
@@ -527,12 +547,14 @@ class OllamaGUI(QMainWindow):
 
         self.retriever = None
         self.model_vision_cache = {}
+        self.embedding_models = ["nomic-embed-text:latest", "mxbai-embed-large:latest"]  # Example options
 
         self.init_ui()
         self.load_models()
         self.refresh_conversations()
         self.refresh_crews_list()
         self.update_current_crew_button()
+        self.update_attach_button()
 
     def init_ui(self):
         central = QWidget()
@@ -569,6 +591,12 @@ class OllamaGUI(QMainWindow):
         self.rag_btn.setMinimumHeight(50)
         left.addWidget(self.rag_btn)
 
+        self.embedding_box = QComboBox()
+        self.embedding_box.addItems(self.embedding_models)
+        self.embedding_box.setCurrentText("nomic-embed-text:latest")
+        left.addWidget(QLabel("<b>Embedding Model:</b>"))
+        left.addWidget(self.embedding_box)
+
         self.cancel_rag_btn = QPushButton("❌ Cancel RAG")
         self.cancel_rag_btn.clicked.connect(self.cancel_rag)
         self.cancel_rag_btn.setVisible(False)
@@ -578,6 +606,11 @@ class OllamaGUI(QMainWindow):
         self.clear_rag_btn.clicked.connect(self.clear_rag_knowledge)
         self.clear_rag_btn.setEnabled(False)
         left.addWidget(self.clear_rag_btn)
+
+        self.remove_rag_doc_btn = QPushButton("🗑️ Remove Document")
+        self.remove_rag_doc_btn.clicked.connect(self.remove_rag_document)
+        self.remove_rag_doc_btn.setEnabled(False)
+        left.addWidget(self.remove_rag_doc_btn)
 
         self.rag_progress = QProgressBar()
         self.rag_progress.setVisible(False)
@@ -608,6 +641,7 @@ class OllamaGUI(QMainWindow):
         top.addWidget(QLabel("Single Model:"))
         self.model_box = QComboBox()
         self.model_box.setMinimumWidth(400)
+        self.model_box.currentIndexChanged.connect(self.update_attach_button)
         top.addWidget(self.model_box)
         top.addStretch()
         self.mode_btn = QPushButton("⚡ Crew Mode: OFF")
@@ -700,6 +734,13 @@ class OllamaGUI(QMainWindow):
             self.model_vision_cache[fallback] = False
             self.chat.append(f"\n⚠️ Ollama not reachable: {e}\nUsing fallback.\n")
 
+    def update_attach_button(self):
+        model = self.model_box.currentText()
+        is_vision = self.model_vision_cache.get(model, False)
+        self.attach_btn.setEnabled(is_vision)
+        if not is_vision:
+            self.chat.append(f"\n⚠️ Selected model '{model}' does not support vision. Attach button disabled.\n")
+
     def attach_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)")
         if not path:
@@ -724,7 +765,8 @@ class OllamaGUI(QMainWindow):
         self.rag_progress.setVisible(True)
         self.rag_progress.setValue(0)
         self.chat.append("\n🔄 Building knowledge base...\n")
-        self.rag_worker = RAGWorker(paths)
+        embed_model = self.embedding_box.currentText()
+        self.rag_worker = RAGWorker(paths, embed_model)
         self.rag_worker.progress.connect(self.update_rag_progress)
         self.rag_worker.message.connect(lambda m: self.chat.append(m))
         self.rag_worker.finished.connect(self.on_rag_finished)
@@ -750,6 +792,7 @@ class OllamaGUI(QMainWindow):
         self.rag_progress.setVisible(False)
         self.rag_btn.setEnabled(True)
         self.clear_rag_btn.setEnabled(True)
+        self.remove_rag_doc_btn.setEnabled(True)
         self.chat.append("\n✅ Knowledge base ready!\n")
 
     def on_rag_error(self, err):
@@ -760,7 +803,7 @@ class OllamaGUI(QMainWindow):
         self.rag_btn.setEnabled(True)
 
     def clear_rag_knowledge(self):
-        reply = QMessageBox.question(self, "Clear RAG", "This will delete all knowledge and require app restart.\nContinue?")
+        reply = QMessageBox.question(self, "Clear RAG", "This will delete all knowledge. Continue?")
         if reply != QMessageBox.Yes:
             return
         persist_dir = os.path.join(os.path.expanduser("~"), ".ollama_gui", "rag_db")
@@ -768,8 +811,24 @@ class OllamaGUI(QMainWindow):
             shutil.rmtree(persist_dir, ignore_errors=True)
         self.retriever = None
         self.clear_rag_btn.setEnabled(False)
-        QMessageBox.information(self, "Cleared", "RAG cleared. Restart the app.")
-        QApplication.quit()
+        self.remove_rag_doc_btn.setEnabled(False)
+        self.chat.append("\n✅ RAG cleared.\n")
+
+    def remove_rag_document(self):
+        doc_name, ok = QInputDialog.getText(self, "Remove Document", "Enter document name (source):")
+        if not ok or not doc_name:
+            return
+        try:
+            persist_dir = os.path.join(os.path.expanduser("~"), ".ollama_gui", "rag_db")
+            vectordb = Chroma(persist_directory=persist_dir, embedding_function=OllamaEmbeddings(model=self.embedding_box.currentText()), collection_name="rag_main")
+            existing = vectordb.get(where={"source": doc_name})
+            if existing["ids"]:
+                vectordb.delete(ids=existing["ids"])
+                self.chat.append(f"\n✅ Removed document: {doc_name}\n")
+            else:
+                self.chat.append(f"\n⚠️ Document not found: {doc_name}\n")
+        except Exception as e:
+            self.chat.append(f"\n❌ Error removing document: {str(e)}\n")
 
     def open_model_manager(self):
         manager_file = "ollama_manager.py"
