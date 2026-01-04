@@ -481,8 +481,8 @@ SYSTEM You are a helpful assistant.""")
 
         def push():
             try:
-                proc = subprocess.Popen(["ollama", "push", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_lines=True)
-                for line in proc:
+                proc = subprocess.Popen(["ollama", "push", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                for line in proc.stdout:
                     line = line.strip()
                     if line:
                         self.log_signal.emit(line)
@@ -517,8 +517,8 @@ SYSTEM You are a helpful assistant.""")
 
         def pull():
             try:
-                proc = subprocess.Popen(["ollama", "pull", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_lines=True)
-                for line in proc:
+                proc = subprocess.Popen(["ollama", "pull", model], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                for line in proc.stdout:
                     line = line.strip()
                     if line:
                         self.log_signal.emit(line)
